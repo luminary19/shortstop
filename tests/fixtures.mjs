@@ -126,7 +126,9 @@ async function fetchFaceImage() {
   if (existsSync(dest)) return dest;
   for (const url of FACE_URLS) {
     try {
-      await execa('curl', ['-sfL', '--max-time', '60', '-o', dest, url]);
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(60_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
       return dest;
     } catch { /* try next */ }
   }

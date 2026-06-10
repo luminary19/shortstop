@@ -58,9 +58,10 @@ export async function resolveFfmpeg() {
     }
     failures.push(`${c.origin}: ${check.reason ?? 'ffprobe missing'}`);
   }
+  const installHint = process.platform === 'win32' ? 'winget install Gyan.FFmpeg' : 'apt install ffmpeg';
   throw new Error(
     'no working ffmpeg found.\n' + failures.map((f) => `  - ${f}`).join('\n') +
-    '\nfix: re-run `npm install` in the skill folder, or install ffmpeg (apt install ffmpeg) with libass/loudnorm support.',
+    `\nfix: re-run \`npm install\` in the skill folder, or install ffmpeg (${installHint}) with libass/loudnorm support.`,
   );
 }
 

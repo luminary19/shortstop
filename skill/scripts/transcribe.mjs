@@ -10,7 +10,7 @@ import { extractWhisperWav } from './lib/ffmpeg.mjs';
 import { runPython } from './lib/venv.mjs';
 
 export async function transcribe(runDir, { config } = {}) {
-  if (!config) config = loadConfig().config;
+  if (!config) config = loadConfig(process.cwd(), { runDir }).config;
   const probe = readArtifact('probe', join(runDir, 'probe.json'));
   const media = probe.normalized_path ?? probe.source;
 

@@ -42,11 +42,15 @@ export function pruneRuns(runsRoot, keepLast) {
 }
 
 export function deliver(runDir, outputDir, { attempt = 0, config } = {}) {
-  if (!config) config = loadConfig().config;
+  if (!config) config = loadConfig(process.cwd(), { runDir }).config;
   const probe = readArtifact('probe', join(runDir, 'probe.json'));
   const report = readArtifact('qa_report', join(runDir, `qa_report_a${attempt}.json`));
   const candidate = join(runDir, `candidate_a${attempt}.mp4`);
-  const runId = basename(runDir);
+  // shorts multi-clip: runDir may be runs/<id>/clip<N> — name outputs
+  // <stem>-<id>-clip<N>.mp4 and prune at the real runs root, not inside the run.
+  const isClipDir = /^clip\d+$/.test(basename(runDir));
+  const runId = isClipDir ? `${basename(dirname(runDir))}-${basename(runDir)}` : basename(runDir);
+  const runsRoot = isClipDir ? dirname(dirname(runDir)) : dirname(runDir);
   const stem = basename(probe.source).replace(/\.[^.]+$/, '');
   mkdirSync(outputDir, { recursive: true });
 
@@ -65,7 +69,7 @@ export function deliver(runDir, outputDir, { attempt = 0, config } = {}) {
     reportPath = outReport;
   }
   if (deliveredPath) {
-    pruneRuns(dirname(runDir), config.runs.keep_last);
+    pruneRuns(runsRoot, config.runs.keep_last);
   }
   return { decision, deliveredPath, reportPath, hardGaps: hasHardGaps(report) };
 }

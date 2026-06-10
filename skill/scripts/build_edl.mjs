@@ -145,8 +145,21 @@ export function buildEdl(draft, { probe, silence, transcript, config }) {
     });
   }
 
-  // 6. coverage stats
+  // 6. hard clip-length cap (shorts mode): the final kept duration, after padding
+  // and snapping, must fit the cap — this is the delivery guarantee, not QA advice.
   const keptS = keeps.reduce((a, k) => a + (k.end - k.start), 0);
+  if (config.cut.max_clip_s != null && keptS > config.cut.max_clip_s + EPS) {
+    return {
+      ok: false,
+      reasons: [{
+        code: 'too_long',
+        detail: `kept duration ${keptS.toFixed(2)}s exceeds cut.max_clip_s=${config.cut.max_clip_s}s — ` +
+          `trim ${(keptS - config.cut.max_clip_s).toFixed(2)}s of the weakest content and resubmit`,
+      }],
+    };
+  }
+
+  // 7. coverage stats
   const removedByKind = {};
   for (const r of removed) removedByKind[r.kind] = (removedByKind[r.kind] ?? 0) + (r.end - r.start);
   const edl = {
@@ -171,7 +184,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error('usage: build_edl.mjs <runDir> <draftPath>');
     process.exit(1);
   }
-  const { config } = loadConfig();
+  const { config } = loadConfig(process.cwd(), { runDir });
   const probe = readArtifact('probe', join(runDir, 'probe.json'));
   const silence = readArtifact('silence', join(runDir, 'silence.json'));
   const transcript = readArtifact('transcript', join(runDir, 'transcript.json'));

@@ -8,7 +8,7 @@ import Ajv from 'ajv';
 const SKILL_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const SCHEMA_DIR = join(SKILL_ROOT, 'schemas');
 
-export const ARTIFACT_KINDS = ['probe', 'transcript', 'silence', 'track', 'edl', 'qa_report'];
+export const ARTIFACT_KINDS = ['probe', 'transcript', 'silence', 'track', 'edl', 'qa_report', 'ideas'];
 
 const ajv = new Ajv({ allErrors: true, strict: true });
 const validators = new Map();
@@ -52,6 +52,19 @@ const SEMANTIC_CHECKS = {
       if (k.end <= k.start) errs.push({ instancePath: `/keep/${i}`, message: 'end must be > start' });
       if (k.start < prevEnd) errs.push({ instancePath: `/keep/${i}`, message: 'keep segments must be sorted and non-overlapping' });
       prevEnd = k.end;
+    });
+    return errs;
+  },
+  ideas(data) {
+    const errs = [];
+    let prevEnd = -Infinity;
+    const seen = new Set();
+    data.ideas.forEach((idea, i) => {
+      if (idea.end <= idea.start) errs.push({ instancePath: `/ideas/${i}`, message: 'end must be > start' });
+      if (idea.start < prevEnd) errs.push({ instancePath: `/ideas/${i}`, message: 'ideas must be sorted and non-overlapping' });
+      if (seen.has(idea.id)) errs.push({ instancePath: `/ideas/${i}`, message: `duplicate idea id ${idea.id}` });
+      seen.add(idea.id);
+      prevEnd = idea.end;
     });
     return errs;
   },
@@ -106,21 +119,46 @@ function deepMerge(base, override) {
   return override;
 }
 
-// Defaults merged under <projectDir>/shortstop.config.json (if present); result is validated.
-export function loadConfig(projectDir = process.cwd()) {
-  const defaults = JSON.parse(readFileSync(join(SKILL_ROOT, 'config', 'default.config.json'), 'utf8'));
-  let merged = defaults;
-  const overridePath = join(projectDir, 'shortstop.config.json');
-  let overridden = false;
+// Mode presets sit between defaults and user overrides: a project/run override of
+// any individual key still wins over its mode's preset value.
+export const MODE_PRESETS = {
+  shorts: {
+    aspect: { mode: '9:16', out_width: 720, out_height: 1280 },
+    cut: { max_clip_s: 60 },
+    qa: { shorts_max_s: 60 },
+  },
+  longform: {
+    aspect: { mode: '16:9', out_width: 1920, out_height: 1080 },
+    cut: { max_clip_s: null },
+    qa: { shorts_max_s: null },
+  },
+};
+
+function readJsonIfPresent(path, label) {
   try {
-    const override = JSON.parse(readFileSync(overridePath, 'utf8'));
-    merged = deepMerge(defaults, override);
-    overridden = true;
+    return JSON.parse(readFileSync(path, 'utf8'));
   } catch (err) {
-    if (err.code !== 'ENOENT') throw new Error(`cannot read ${overridePath}: ${err.message}`);
+    if (err.code === 'ENOENT') return null;
+    throw new Error(`cannot read ${label} at ${path}: ${err.message}`);
   }
+}
+
+// Merge order: defaults < MODE_PRESETS[mode] < <projectDir>/shortstop.config.json
+// < <runDir>/config.overrides.json (the per-run mode/aspect choice written by the
+// orchestrator). The mode itself is taken from the most specific layer that sets it.
+export function loadConfig(projectDir = process.cwd(), { runDir } = {}) {
+  const defaults = JSON.parse(readFileSync(join(SKILL_ROOT, 'config', 'default.config.json'), 'utf8'));
+  const project = readJsonIfPresent(join(projectDir, 'shortstop.config.json'), 'project config');
+  const run = runDir ? readJsonIfPresent(join(runDir, 'config.overrides.json'), 'run config overrides') : null;
+
+  const mode = run?.mode ?? project?.mode ?? defaults.mode ?? 'shorts';
+  if (!MODE_PRESETS[mode]) throw new Error(`unknown mode "${mode}" (expected shorts | longform)`);
+
+  let merged = deepMerge(deepMerge(defaults, { mode }), MODE_PRESETS[mode]);
+  if (project) merged = deepMerge(merged, project);
+  if (run) merged = deepMerge(merged, run);
   validateArtifact('config', merged);
-  return { config: merged, overridden };
+  return { config: merged, overridden: Boolean(project || run) };
 }
 
 export { SKILL_ROOT };

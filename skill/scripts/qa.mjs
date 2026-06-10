@@ -103,7 +103,7 @@ function parseAssSanity(assPath, durationS) {
 }
 
 export async function qaMeasure(runDir, { attempt = 0, config, referenceDir } = {}) {
-  if (!config) config = loadConfig().config;
+  if (!config) config = loadConfig(process.cwd(), { runDir }).config;
   const probe = readArtifact('probe', join(runDir, 'probe.json'));
   const edl = readArtifact('edl', join(runDir, 'edl.json'));
   const track = existsSync(join(runDir, 'track.json'))
@@ -156,8 +156,8 @@ export async function qaMeasure(runDir, { attempt = 0, config, referenceDir } = 
     gap('frozen_frames', 'hard', vis.freeze_regions, 0, 'inspect source decode and EDL; re-render pass A');
   }
 
-  // shorts length (soft)
-  if (durS > config.qa.shorts_max_s) {
+  // shorts length (soft; disabled when shorts_max_s is null, e.g. longform mode)
+  if (config.qa.shorts_max_s != null && durS > config.qa.shorts_max_s) {
     gap('shorts_length', 'soft', durS, config.qa.shorts_max_s,
       'set cut.target_duration_s and re-run cut decisions, or accept the longer cut');
   }

@@ -5,6 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "mode": { "enum": ["shorts", "longform"] },
     "input": {
       "type": "object",
       "additionalProperties": false,
@@ -38,14 +39,15 @@
         "max_pause_s": { "type": "number", "exclusiveMinimum": 0 },
         "pad_s": { "type": "number", "minimum": 0 },
         "aggressiveness": { "enum": ["gentle", "normal", "aggressive"] },
-        "target_duration_s": { "type": ["number", "null"], "exclusiveMinimum": 0 }
+        "target_duration_s": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "max_clip_s": { "type": ["number", "null"], "exclusiveMinimum": 0 }
       }
     },
     "aspect": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": { "enum": ["9:16", "source"] },
+        "mode": { "enum": ["9:16", "16:9", "source"] },
         "no_face_fallback": { "enum": ["blur-pad", "center-crop"] },
         "out_width": { "type": "integer", "minimum": 2 },
         "out_height": { "type": "integer", "minimum": 2 }
@@ -96,7 +98,7 @@
         "max_fix_attempts": { "type": "integer", "minimum": 0 },
         "duration_tolerance_frames": { "type": "integer", "minimum": 0 },
         "lufs_tolerance": { "type": "number", "exclusiveMinimum": 0 },
-        "shorts_max_s": { "type": "number", "exclusiveMinimum": 0 },
+        "shorts_max_s": { "type": ["number", "null"], "exclusiveMinimum": 0 },
         "pacing_tolerance": { "type": "number", "exclusiveMinimum": 0 },
         "framing_tolerance": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
         "verify_transcript": { "type": "boolean" }

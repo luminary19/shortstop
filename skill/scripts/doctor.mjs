@@ -5,7 +5,13 @@ import { existsSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SKILL_ROOT } from './lib/artifacts.mjs';
 import { resolveFfmpeg } from './lib/ffmpeg.mjs';
-import { findSystemPython, venvReady, pythonImportOk, capturePython } from './lib/venv.mjs';
+import { findSystemPython, venvReady, venvPython, pythonImportOk, capturePython } from './lib/venv.mjs';
+
+const IS_WINDOWS = process.platform === 'win32';
+const PYTHON_FIX = IS_WINDOWS
+  ? 'install Python 3 from https://python.org (check "Add to PATH") or `winget install Python.Python.3.12`'
+  : 'apt install python3 python3-venv';
+const FFMPEG_FIX = IS_WINDOWS ? 'winget install Gyan.FFmpeg' : 'apt install ffmpeg';
 
 export const YUNET_PATH = join(SKILL_ROOT, 'models', 'yunet.onnx');
 export const WHISPER_DIR = join(SKILL_ROOT, 'models', 'whisper');
@@ -33,13 +39,13 @@ export async function runChecks() {
     add('ffmpeg + ffprobe', true, `${ff.origin}: ${ff.version}`);
   } catch (err) {
     add('ffmpeg + ffprobe', false, err.message.split('\n')[0],
-      `npm install --prefix ${SKILL_ROOT}  (or: apt install ffmpeg)`);
+      `npm install --prefix ${SKILL_ROOT}  (or: ${FFMPEG_FIX})`);
   }
 
   // python
   const py = await findSystemPython();
   add('python3 >= 3.9', Boolean(py && !py.tooOld), py ? `python ${py.version}` : 'not found',
-    'apt install python3 python3-venv');
+    PYTHON_FIX);
 
   // venv + imports
   add('python venv', venvReady(), venvReady() ? '.venv present' : 'missing',
@@ -47,10 +53,10 @@ export async function runChecks() {
   if (venvReady()) {
     const fw = await pythonImportOk('faster_whisper');
     add('faster-whisper', fw, fw ? await capturePython('import faster_whisper; print(faster_whisper.__version__)').catch(() => 'importable') : 'import fails',
-      `${join(SKILL_ROOT, '.venv', 'bin', 'pip')} install "faster-whisper>=1.1,<2"`);
+      `${venvPython()} -m pip install "faster-whisper>=1.1,<2"`);
     const cv = await pythonImportOk('cv2');
     add('opencv (headless)', cv, cv ? await capturePython('import cv2; print(cv2.__version__)').catch(() => 'importable') : 'import fails',
-      `${join(SKILL_ROOT, '.venv', 'bin', 'pip')} install "opencv-python-headless>=4.10,<5"`);
+      `${venvPython()} -m pip install "opencv-python-headless>=4.10,<5"`);
   }
 
   // models

@@ -114,12 +114,23 @@ async function measureLoudness(path, config) {
 export async function renderPassB(runDir, { probe, edl, track, config, attempt, audioOverrides = {} }) {
   const mezzPath = join(runDir, 'mezzanine.mkv');
   const is916 = config.aspect.mode === '9:16';
+  const is169 = config.aspect.mode === '16:9';
   const outW = config.aspect.out_width;
   const outH = config.aspect.out_height;
 
   // video chain
   const vparts = [];
-  if (is916) {
+  // blur-pad: full frame fit over a blurred, zoomed copy of itself
+  const blurPad =
+    `split[bp_fg][bp_bg];[bp_bg]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},gblur=sigma=24[bp_b];` +
+    `[bp_fg]scale=${outW}:${outH}:force_original_aspect_ratio=decrease:flags=lanczos[bp_f];` +
+    `[bp_b][bp_f]overlay=(W-w)/2:(H-h)/2`;
+  if (is169) {
+    // longform: no face tracking — plain scale when the source already matches
+    // the output aspect, blur-pad fit otherwise
+    const sameAspect = Math.abs(probe.display_width / probe.display_height - outW / outH) < 0.01;
+    vparts.push(sameAspect ? `scale=${outW}:${outH}:flags=lanczos` : blurPad);
+  } else if (is916) {
     if (track.mode === 'face') {
       const cmdFile = buildCropCmdFile(track, edl, probe, join(runDir, 'crop.cmd'));
       const x0 = Math.max(0, Math.round(track.crop_path[0].x / 2) * 2);
@@ -132,10 +143,7 @@ export async function renderPassB(runDir, { probe, edl, track, config, attempt, 
       vparts.push(`crop=w=${track.crop_w}:h=${track.crop_h}:x=${p.x}:y=${p.y}`);
       vparts.push(`scale=${outW}:${outH}:flags=lanczos`);
     } else {
-      // blur-pad: full frame fit over a blurred, zoomed copy of itself
-      vparts.push(`split[bp_fg][bp_bg];[bp_bg]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},gblur=sigma=24[bp_b];` +
-        `[bp_fg]scale=${outW}:${outH}:force_original_aspect_ratio=decrease:flags=lanczos[bp_f];` +
-        `[bp_b][bp_f]overlay=(W-w)/2:(H-h)/2`);
+      vparts.push(blurPad);
     }
   }
   const assPath = join(runDir, 'captions.ass');
@@ -197,8 +205,8 @@ export async function assertCandidate(candidate, { probe, edl, config }) {
     if (r.num * probe.fps_den !== probe.fps_num * r.den) {
       problems.push(`fps ${v.r_frame_rate} != expected ${probe.fps_num}/${probe.fps_den}`);
     }
-    const expW = config.aspect.mode === '9:16' ? config.aspect.out_width : probe.display_width;
-    const expH = config.aspect.mode === '9:16' ? config.aspect.out_height : probe.display_height;
+    const expW = config.aspect.mode === 'source' ? probe.display_width : config.aspect.out_width;
+    const expH = config.aspect.mode === 'source' ? probe.display_height : config.aspect.out_height;
     if (v.width !== expW || v.height !== expH) {
       problems.push(`dims ${v.width}x${v.height} != expected ${expW}x${expH}`);
     }
@@ -225,7 +233,7 @@ function edlHash(edl) {
 }
 
 export async function renderStage(runDir, { attempt = 0, config, audioOverrides } = {}) {
-  if (!config) config = loadConfig().config;
+  if (!config) config = loadConfig(process.cwd(), { runDir }).config;
   await resolveFfmpeg();
   const probe = readArtifact('probe', join(runDir, 'probe.json'));
   const edl = readArtifact('edl', join(runDir, 'edl.json'));

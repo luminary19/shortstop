@@ -73,12 +73,19 @@ test('ASS builds, events in range, ffmpeg parses and burns it', { timeout: 120_0
   assert.equal(eventLines.length, lineCount);
   assert.ok(ass.includes('\\k'), 'karaoke tags expected');
 
+  // style values scale with PlayRes height (tuned at 1920): 720x1280 → size 64, margin 280
+  assert.ok(ass.includes(`PlayResX: ${config.aspect.out_width}`));
+  const expSize = Math.round(config.captions.size * config.aspect.out_height / 1920);
+  const expMargin = Math.round(config.captions.margin_v * config.aspect.out_height / 1920);
+  assert.ok(ass.includes(`,${expSize},`), `expected scaled Fontsize ${expSize}`);
+  assert.ok(ass.includes(`,${expMargin},1\n`), `expected scaled MarginV ${expMargin}`);
+
   const assPath = join(dir, 'captions.ass');
   writeFileSync(assPath, ass);
   const fontsDir = join(SKILL_ROOT, 'assets', 'fonts');
   // dry-run burn on 1 s of black at output size — fails loudly on a bad .ass
   await ffmpeg([
-    '-f', 'lavfi', '-i', 'color=c=black:size=1080x1920:rate=30:duration=1',
+    '-f', 'lavfi', '-i', `color=c=black:size=${config.aspect.out_width}x${config.aspect.out_height}:rate=30:duration=1`,
     '-vf', `subtitles=${escapeFilterPath(assPath)}:fontsdir=${escapeFilterPath(fontsDir)}`,
     '-frames:v', '10', '-f', 'null', '-',
   ]);

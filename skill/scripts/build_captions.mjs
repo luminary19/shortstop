@@ -63,10 +63,21 @@ export function groupLines(words, cfg) {
   return lines;
 }
 
+// captions.size/margin_v/outline are tuned at a 1920-high output; scale them
+// to the actual PlayRes height so 720x1280 shorts and 1920x1080 longform get
+// the same visual proportion.
+const CAPTION_REF_H = 1920;
+
 export function buildAss(transcript, edl, probe, config) {
-  const cfg = config.captions;
   const playW = config.aspect.mode === 'source' ? probe.display_width : config.aspect.out_width;
   const playH = config.aspect.mode === 'source' ? probe.display_height : config.aspect.out_height;
+  const capScale = playH / CAPTION_REF_H;
+  const cfg = {
+    ...config.captions,
+    size: Math.max(8, Math.round(config.captions.size * capScale)),
+    margin_v: Math.round(config.captions.margin_v * capScale),
+    outline: Math.max(1, Math.round(config.captions.outline * capScale)),
+  };
   const { words, outputDuration } = mapWordsToOutput(transcript, edl, probe);
   const lines = groupLines(words, cfg);
 
@@ -103,7 +114,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 }
 
 export function captionsStage(runDir, { config } = {}) {
-  if (!config) config = loadConfig().config;
+  if (!config) config = loadConfig(process.cwd(), { runDir }).config;
   const probe = readArtifact('probe', join(runDir, 'probe.json'));
   const transcript = readArtifact('transcript', join(runDir, 'transcript.json'));
   const edl = readArtifact('edl', join(runDir, 'edl.json'));

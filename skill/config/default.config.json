@@ -1,5 +1,6 @@
 {
-  "input": { "max_minutes": 20 },
+  "mode": "shorts",
+  "input": { "max_minutes": 60 },
   "whisper": { "model": "small", "language": "auto" },
   "silence": {
     "auto_calibrate": true,
@@ -12,13 +13,14 @@
     "max_pause_s": 0.8,
     "pad_s": 0.1,
     "aggressiveness": "normal",
-    "target_duration_s": null
+    "target_duration_s": null,
+    "max_clip_s": null
   },
   "aspect": {
     "mode": "9:16",
     "no_face_fallback": "blur-pad",
-    "out_width": 1080,
-    "out_height": 1920
+    "out_width": 720,
+    "out_height": 1280
   },
   "captions": {
     "enabled": true,
@@ -42,7 +44,7 @@
     "max_fix_attempts": 5,
     "duration_tolerance_frames": 1,
     "lufs_tolerance": 2,
-    "shorts_max_s": 180,
+    "shorts_max_s": 60,
     "pacing_tolerance": 0.5,
     "framing_tolerance": 0.15,
     "verify_transcript": false

@@ -1,8 +1,9 @@
-// Phase 8 acceptance: 2-segment EDL → playable mp4 at 1080×1920, fps == source
-// rational, duration == Σkeep ± 1 frame, −14 ± 1 LUFS, ≤ −1 dBTP, source rate.
+// Phase 8 acceptance: 2-segment EDL → playable mp4 at the configured output
+// resolution (shorts default 720×1280), fps == source rational,
+// duration == Σkeep ± 1 frame, −14 ± 1 LUFS, ≤ −1 dBTP, source rate.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { probe } from 'shortstop-skill/scripts/probe.mjs';
@@ -61,8 +62,8 @@ test('blur-pad render path (no face): full acceptance gates', { timeout: 600_000
   const data = await ffprobeJson(['-show_streams', '-show_format', candidate]);
   const v = data.streams.find((s) => s.codec_type === 'video');
   const a = data.streams.find((s) => s.codec_type === 'audio');
-  assert.equal(v.width, 1080);
-  assert.equal(v.height, 1920);
+  assert.equal(v.width, config.aspect.out_width);
+  assert.equal(v.height, config.aspect.out_height);
   assert.equal(v.r_frame_rate, '30/1');
   assert.equal(Number(a.sample_rate), 48000);
   const dur = Number(data.format.duration);
@@ -95,11 +96,36 @@ test('face render path: sendcmd dynamic crop + pass-B-only rerender', { timeout:
   const first = await renderStage(runDir, { attempt: 0, config });
   assert.equal(first.passARan, true);
   const v = (await ffprobeJson(['-show_streams', first.candidate])).streams.find((s) => s.codec_type === 'video');
-  assert.equal(v.width, 1080);
-  assert.equal(v.height, 1920);
+  assert.equal(v.width, config.aspect.out_width);
+  assert.equal(v.height, config.aspect.out_height);
 
   // unchanged EDL → pass B only
   const second = await renderStage(runDir, { attempt: 1, config });
   assert.equal(second.passARan, false);
   assert.ok(second.candidate.endsWith('candidate_a1.mp4'));
+});
+
+test('longform 16:9 render: portrait source blur-pads to 1920×1080, no track artifact needed', { timeout: 600_000 }, async () => {
+  const proj = join(dir, 'lfproj');
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(proj, 'shortstop.config.json'), JSON.stringify({ mode: 'longform' }));
+  const lfConfig = loadConfig(proj).config;
+  assert.equal(lfConfig.aspect.mode, '16:9');
+
+  const runDir = join(dir, 'longform');
+  const { artifact: p } = await probe(join(FIXTURE_DIR, 'speech.mp4'), runDir, { config: lfConfig });
+  const edl = {
+    source: p.source,
+    keep: [{ start: 0.5, end: 4.0, reason: 'single keep' }],
+    removed: [],
+    notes: '',
+  };
+  writeArtifact('edl', join(runDir, 'edl.json'), edl);
+  writeArtifact('transcript', join(runDir, 'transcript.json'), fakeTranscript(p.duration_s));
+  captionsStage(runDir, { config: lfConfig });
+
+  const { candidate } = await renderStage(runDir, { attempt: 0, config: lfConfig });
+  const v = (await ffprobeJson(['-show_streams', candidate])).streams.find((s) => s.codec_type === 'video');
+  assert.equal(v.width, 1920);
+  assert.equal(v.height, 1080);
 });

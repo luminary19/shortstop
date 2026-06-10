@@ -44,8 +44,12 @@ test('rotated fixture: display dims corrected, rotation baked', async () => {
   assert.equal(artifact.height, 1920);
 });
 
-test('21-minute fixture: rejected with one-line message', async () => {
-  const res = await probe(fx('long21.mp4'), join(dir, 'long'));
+test('over-cap input: rejected with one-line message', async () => {
+  // default cap is 60 min; tighten it to exercise the rejection on the 21-min fixture
+  const { loadConfig } = await import('shortstop-skill/scripts/lib/artifacts.mjs');
+  const config = loadConfig('/nonexistent-no-override').config;
+  config.input.max_minutes = 20;
+  const res = await probe(fx('long21.mp4'), join(dir, 'long'), { config });
   assert.ok(res.rejected);
   assert.match(res.rejected, /over the 20 min limit/);
   assert.ok(!res.rejected.includes('\n'));

@@ -35,6 +35,14 @@ deciding *what* to cut; the validator (`build_edl.mjs`) owns *where exactly* the
 - Preserve meaning and cadence: the kept segments must read as one coherent take.
 - Do **not** cut for length unless `config.cut.target_duration_s` is set; if it is set,
   prefer cutting weaker asides over core content to approach (never butcher to hit) it.
+- `config.cut.max_clip_s` (when set, e.g. 60 s in shorts mode) is a **hard cap** the
+  validator enforces on the final kept duration: keep total kept time comfortably under
+  it (padding/snapping adds a little back). If the content cannot fit without
+  butchering, cut the weakest complete sub-points first.
+- **Idea-clip runs** (shorts mode, run dir is `clip<N>/`): the entry with matching `id`
+  in this dir's `ideas.json` defines the clip's source span — every keep segment must
+  lie inside `[idea.start, idea.end]`. Content outside the span does not exist for
+  this clip.
 - Words with `prob < 0.5` are unreliable transcriptions: **keep them** unless they fall
   entirely inside a detected silence region.
 - **Only cut what the rules justify. When unsure, keep it.**

@@ -99,7 +99,7 @@ export async function analyzeSilence(audioPath, config) {
 
 // Artifact-level stage: shared mixdown from probe.json → silence.json.
 export async function silenceStage(runDir, { config } = {}) {
-  if (!config) config = loadConfig().config;
+  if (!config) config = loadConfig(process.cwd(), { runDir }).config;
   const probe = readArtifact('probe', join(runDir, 'probe.json'));
   const media = probe.normalized_path ?? probe.source;
 

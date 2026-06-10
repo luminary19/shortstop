@@ -143,3 +143,21 @@ test('touching keeps merge; sub-2-frame removals dropped', () => {
   assert.ok(res.ok, JSON.stringify(res.reasons));
   assert.equal(res.edl.keep.length, 1);
 });
+
+test('kept duration over cut.max_clip_s rejected with too_long', () => {
+  const capped = { ...ctx, config: { ...config, cut: { ...config.cut, max_clip_s: 5 } } };
+  const res = buildEdl(draft([
+    { start: 0.2, end: 5.8, reason: 'too much kept' },
+  ]), capped);
+  assert.equal(res.ok, false);
+  assert.equal(res.reasons[0].code, 'too_long');
+  assert.ok(res.reasons[0].detail.includes('max_clip_s'), res.reasons[0].detail);
+});
+
+test('max_clip_s null disables the cap', () => {
+  const uncapped = { ...ctx, config: { ...config, cut: { ...config.cut, max_clip_s: null } } };
+  const res = buildEdl(draft([
+    { start: 0.2, end: 5.8, reason: 'long keep allowed' },
+  ]), uncapped);
+  assert.ok(res.ok, JSON.stringify(res.reasons));
+});

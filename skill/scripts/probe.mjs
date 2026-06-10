@@ -29,7 +29,7 @@ async function probeFile(path) {
 }
 
 export async function probe(inputPath, runDir, { config } = {}) {
-  if (!config) config = loadConfig().config;
+  if (!config) config = loadConfig(process.cwd(), { runDir }).config;
   const input = resolve(inputPath);
   mkdirSync(runDir, { recursive: true });
 

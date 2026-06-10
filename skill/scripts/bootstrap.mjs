@@ -26,13 +26,20 @@ const YUNET_URLS = [
   'https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx',
 ];
 
+// Node's built-in fetch — no curl dependency, works on Windows/macOS/Linux alike.
 async function downloadYunet(dest) {
   if (existsSync(dest) && statSync(dest).size > 100_000) return;
   mkdirSync(join(SKILL_ROOT, 'models'), { recursive: true });
   for (const url of YUNET_URLS) {
     log(`downloading YuNet face model: ${url}`);
-    const failed = await run0('curl', ['-sfL', '--max-time', '300', '-o', dest, url]).then(() => false, () => true);
-    if (!failed && existsSync(dest) && statSync(dest).size > 100_000 &&
+    try {
+      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(300_000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+    } catch (err) {
+      log(`  download failed: ${err.message}`);
+    }
+    if (existsSync(dest) && statSync(dest).size > 100_000 &&
         !readFileSync(dest).subarray(0, 12).toString().startsWith('version http')) {
       return;
     }
@@ -53,7 +60,9 @@ export async function bootstrap() {
   // 2. npm install (skill deps) — dep-free spawn; nothing dep-backed loaded yet
   if (!existsSync(join(SKILL_ROOT, 'node_modules'))) {
     log('installing npm dependencies (ffmpeg-static, ffprobe-static, execa, ajv)…');
-    await run0('npm', ['install', '--no-fund', '--no-audit'], { cwd: SKILL_ROOT });
+    // Windows: npm is npm.cmd, which Node will only spawn through a shell
+    await run0('npm', ['install', '--no-fund', '--no-audit'],
+      { cwd: SKILL_ROOT, shell: process.platform === 'win32' });
   } else {
     log('npm dependencies present');
   }
