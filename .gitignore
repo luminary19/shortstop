@@ -4,6 +4,7 @@ skill/models/
 skill/.shortstop-ready
 tests/fixtures/
 runs/
+dist/
 input/
 output/
 reference/

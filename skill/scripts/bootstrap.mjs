@@ -1,13 +1,25 @@
 #!/usr/bin/env node
 // First-run setup (§6). Idempotent; streams progress; writes .shortstop-ready
 // recording resolved binary paths + versions.
+// IMPORTANT: this file must import nothing that requires node_modules — on a
+// clean machine it runs BEFORE `npm install`. Everything dep-backed is
+// dynamically imported after step 2.
 import { existsSync, mkdirSync, writeFileSync, statSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SKILL_ROOT } from './lib/artifacts.mjs';
-import { run, tryRun } from './lib/spawn.mjs';
+import { spawn } from 'node:child_process';
 
+const SKILL_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const log = (msg) => console.log(`[bootstrap] ${msg}`);
+
+// minimal dep-free spawn (array args, inherited stdio)
+function run0(bin, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: 'inherit', ...opts });
+    child.on('error', reject);
+    child.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`${bin} exited ${code}`)));
+  });
+}
 
 const YUNET_URLS = [
   'https://media.githubusercontent.com/media/opencv/opencv_zoo/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx',
@@ -19,8 +31,8 @@ async function downloadYunet(dest) {
   mkdirSync(join(SKILL_ROOT, 'models'), { recursive: true });
   for (const url of YUNET_URLS) {
     log(`downloading YuNet face model: ${url}`);
-    const res = await tryRun('curl', ['-sfL', '--max-time', '300', '-o', dest, url]);
-    if (!res.failed && existsSync(dest) && statSync(dest).size > 100_000 &&
+    const failed = await run0('curl', ['-sfL', '--max-time', '300', '-o', dest, url]).then(() => false, () => true);
+    if (!failed && existsSync(dest) && statSync(dest).size > 100_000 &&
         !readFileSync(dest).subarray(0, 12).toString().startsWith('version http')) {
       return;
     }
@@ -38,10 +50,10 @@ export async function bootstrap() {
   }
   log(`node v${process.versions.node} ok`);
 
-  // 2. npm install (skill deps)
+  // 2. npm install (skill deps) — dep-free spawn; nothing dep-backed loaded yet
   if (!existsSync(join(SKILL_ROOT, 'node_modules'))) {
     log('installing npm dependencies (ffmpeg-static, ffprobe-static, execa, ajv)…');
-    await run('npm', ['install', '--no-fund', '--no-audit'], { cwd: SKILL_ROOT, stdio: 'inherit' });
+    await run0('npm', ['install', '--no-fund', '--no-audit'], { cwd: SKILL_ROOT });
   } else {
     log('npm dependencies present');
   }
@@ -67,9 +79,9 @@ export async function bootstrap() {
   const whisperDir = join(SKILL_ROOT, 'models', 'whisper', config.whisper.model);
   if (!existsSync(whisperDir)) {
     log(`pre-downloading whisper "${config.whisper.model}" model (one-time, a few hundred MB)…`);
-    await run(venvPython(), ['-c',
+    await run0(venvPython(), ['-c',
       `from faster_whisper.utils import download_model; download_model(${JSON.stringify(config.whisper.model)}, output_dir=${JSON.stringify(whisperDir)})`,
-    ], { stdio: 'inherit' });
+    ]);
   }
   log('whisper model ready');
 

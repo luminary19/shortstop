@@ -6,7 +6,9 @@
   "description": "Dev workspace for the Shortstop skill. The distributable lives in skill/.",
   "scripts": {
     "fixtures": "node tests/fixtures.mjs",
-    "test": "node --test tests/"
+    "test": "node --test tests/",
+    "package": "node scripts/package.mjs",
+    "e2e:clean": "node tests/clean-install-e2e.mjs"
   },
   "dependencies": {
     "shortstop-skill": "file:./skill"

@@ -146,7 +146,9 @@ export async function renderPassB(runDir, { probe, edl, track, config, attempt, 
 
   // audio chain: two-pass loudnorm (linear) + resample back to source rate
   const target = audioOverrides.target_lufs ?? config.audio.target_lufs;
-  const tp = audioOverrides.true_peak_db ?? config.audio.true_peak_db;
+  // 0.5 dB codec headroom: AAC encoding overshoots the PCM peak ceiling, so we
+  // normalize/limit below the configured target to keep the *encoded* TP under it.
+  const tp = (audioOverrides.true_peak_db ?? config.audio.true_peak_db) - 0.5;
   const measured = await measureLoudness(mezzPath, config);
   const srcRate = probe.audio_streams[0].sample_rate;
   let aChain =
