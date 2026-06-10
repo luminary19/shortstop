@@ -158,9 +158,11 @@ async function buildPathological() {
   const segA = join(ASSET_DIR, 'vfr_a.mp4');
   const segB = join(ASSET_DIR, 'vfr_b.mp4');
   await ff(['-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=3',
-    '-c:v', 'libx264', '-crf', '28', '-pix_fmt', 'yuv420p', segA]);
+    '-f', 'lavfi', '-i', `sine=frequency=440:sample_rate=${AR}:duration=3`,
+    '-c:v', 'libx264', '-crf', '28', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', segA]);
   await ff(['-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=15:duration=3',
-    '-c:v', 'libx264', '-crf', '28', '-pix_fmt', 'yuv420p', segB]);
+    '-f', 'lavfi', '-i', `sine=frequency=440:sample_rate=${AR}:duration=3`,
+    '-c:v', 'libx264', '-crf', '28', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', segB]);
   const list = join(ASSET_DIR, 'vfr.txt');
   writeFileSync(list, `file '${segA}'\nfile '${segB}'\n`);
   await ff(['-f', 'concat', '-safe', '0', '-i', list, '-c', 'copy', join(FIXTURE_DIR, 'vfr.mp4')]);
