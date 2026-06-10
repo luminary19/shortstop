@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "shortstop/silence.schema.json",
+  "title": "Stage 2 silence-map artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["noise_floor_db", "threshold_db", "min_silence_s", "calibrated", "regions"],
+  "properties": {
+    "noise_floor_db": { "type": ["number", "null"] },
+    "threshold_db": { "type": "number" },
+    "min_silence_s": { "type": "number", "exclusiveMinimum": 0 },
+    "calibrated": { "type": "boolean" },
+    "regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["start", "end", "dur"],
+        "properties": {
+          "start": { "type": "number", "minimum": 0 },
+          "end": { "type": "number", "minimum": 0 },
+          "dur": { "type": "number", "exclusiveMinimum": 0 }
+        }
+      }
+    }
+  }
+}

@@ -1,495 +1,528 @@
-# Shortstop — Implementation Plan
+# Shortstop — Implementation Plan (v2)
 
-> A Claude Code skill that turns a raw recording into a ready-to-post short-form video, hands-off.
-> Drop a clip in a folder, run `/editor`, get a polished `.mp4` back a couple minutes later.
+> A Claude Code skill that turns a raw recording into a ready-to-post 9:16 YouTube Short, hands-off.
+> Drop a clip in `input/`, invoke the skill, get a polished vertical `.mp4` with word-level captions back a few minutes later.
 
-This is a **build-from-scratch roadmap**. It is greenfield: the repo currently contains only `README.md`. Every recommendation below is opinionated and decisive; where a real trade-off exists, the pick and its one-line reason are stated inline and the alternative is logged in [Open Questions](#10-open-questions). Inline **Assumption:** markers flag gaps filled by judgment that the author should review.
+This is a **build-from-scratch roadmap** for a greenfield repo. Every open question from v1 has been resolved — decisions and rationale live in the [Decision Record](#10-decision-record). Inline **Assumption:** markers flag the remaining gaps filled by judgment.
 
 ---
 
 ## 1. Overview
 
-**Problem.** Editing short-form video by hand is slow and repetitive: transcribe, find the dead air, cut filler and retakes, top-and-tail, render at the right fps, eyeball it against the look you want, fix the rough cuts, export. For a talking-head or screen-recording creator this is 30–90 minutes of mechanical work per clip that follows the same rules every time.
+**Problem.** Editing short-form video by hand is slow and repetitive: transcribe, find the dead air, cut filler and retakes, reframe to vertical, caption every word, normalize audio, render, eyeball it, fix the rough cuts, export. For a talking-head or screen-recording creator this is 30–90 minutes of mechanical work per clip that follows the same rules every time.
 
-**Goal.** Automate the entire mechanical loop inside Claude Code. The user drops a raw clip into `input/`, runs `/editor`, and a few minutes later a polished, ready-to-post `.mp4` lands in `output/`. Claude orchestrates a deterministic pipeline (Whisper → silence-detect → cut-decision → Remotion render → QA loop) and only uses its own judgment where judgment is actually needed: deciding *what to cut* and *whether the result is good enough*.
+**Goal.** Automate the entire loop inside Claude Code. The user drops a raw clip into `input/`, invokes the skill, and a few minutes later a polished, vertical, captioned `.mp4` lands in `output/`. **Claude is the orchestrator**: it runs the deterministic pipeline scripts as tools (probe → transcribe → silence → track → render → QA) and applies its own judgment only where judgment is needed — deciding *what to cut* and *how to close QA gaps*. Scripts never call an LLM.
 
 **Definition of done (a successful delivered `.mp4`).** A delivered clip:
-1. Is a valid, playable H.264/AAC `.mp4` at the **source clip's native fps and resolution** (no resample, no letterbox unless the reference demands it).
-2. Has dead air, filler words, false starts, and abandoned retakes removed, with cuts landing on clean word/silence boundaries (no clipped syllables).
-3. Has normalized, click-free audio (no hard cuts mid-word, no level jumps at edit points).
-4. Passes the [QA loop](#8-qa-loop-design) against the reference clip within the retry ceiling, OR is delivered with an explicit `QA_REPORT.md` flagging the unresolved gap when QA cannot converge.
-5. Is reproducible: re-running on the same input with the same config yields the same EDL and the same output (Claude cut decisions are the one non-deterministic step — see [Risks](#9-risks--mitigations)).
+1. Is a valid, playable H.264/AAC `.mp4` at **1080×1920 (9:16)**, constant frame rate at the source-derived fps (or source aspect/resolution when `aspect: "source"` is configured).
+2. Has dead air, filler words, false starts, and abandoned retakes removed, with every cut placed inside detected silence with padding clearance — **no clipped syllables**.
+3. Keeps the subject framed: tracked center-crop for talking heads, blurred-pad fallback when no face is present (screen recordings).
+4. Has burned-in word-level karaoke-style captions in the platform-safe area (config-disableable).
+5. Has normalized, click-free audio: **−14 LUFS integrated, true peak ≤ −1 dBTP**, no level jumps at edit points.
+6. Passes the [QA loop](#8-qa-loop-design) within 5 fix attempts, OR is delivered with an explicit `QA_REPORT.md` flagging unresolved *soft* gaps. A candidate with unresolved *hard* gaps is **never** delivered to `output/`.
+7. Is replayable: the EDL and all intermediates are archived in `runs/<run-id>/`; the same EDL + config always renders the same output. (Claude's cut *choices* may vary run-to-run; validity is enforced deterministically.)
 
-**Non-goal of this document.** This plan does not write the skill. It is the spec a competent developer (or Claude itself, in a later session) executes phase by phase.
+**Non-goal of this document.** This plan does not write the skill. It is the spec a competent developer (or Claude, in a later session) executes phase by phase, one-shot.
 
 ---
 
 ## 2. Goals & Non-Goals
 
 ### Goals
-- **One-command operation.** `/editor` (or a natural-language ask) on a dropped clip produces a finished `.mp4` with zero further input.
+- **One-command operation.** Invoking the skill on a dropped clip produces a finished Short with zero further input. An optional `--review-edl` mode pauses to show the cut list before rendering.
 - **Hands-off cut decisions.** Filler, long pauses, false starts, and abandoned retakes are removed automatically based on transcript + silence analysis.
-- **Source-faithful render.** Output preserves source fps, resolution, and audio characteristics exactly unless the reference clip dictates otherwise.
-- **Self-configuring distribution.** The skill ships as a downloadable folder that drops into a Claude Code project and bootstraps its own dependencies on first run.
-- **Linux-native.** Targets Linux only for now — one toolchain, no cross-OS abstraction layer.
-- **Bounded, self-correcting QA.** Output is compared to a reference clip; defects are auto-fixed within a retry ceiling; failure is reported, never silently shipped.
-- **Inspectable intermediates.** Every stage writes a durable artifact (transcript, silence map, EDL, render, QA verdict) so any run can be debugged or resumed.
+- **Vertical-first output.** 1080×1920 with subject tracking (static smoothed crop path; no per-frame jitter). Source-aspect passthrough available via config.
+- **Word-level captions by default.** Karaoke-style burned-in captions generated from the existing Whisper word timestamps, styled via config.
+- **ffmpeg-only render path.** No browser, no GPU, no per-seat licensing. The EDL contract is renderer-agnostic so a richer engine (e.g. Remotion) can slot in at v2 without touching stages 0–4.
+- **Self-configuring distribution.** Ships as a skill folder that drops into `.claude/skills/` and bootstraps its own dependencies on first run.
+- **Linux-native.** One toolchain, no cross-OS abstraction.
+- **Bounded, self-correcting QA.** Candidate is measured against absolute gates plus reference-derived style tolerances; defects are auto-fixed within a 5-attempt ceiling; failure is reported, never silently shipped.
+- **Inspectable intermediates.** Every stage writes a durable, schema-validated artifact so any run can be debugged or replayed.
 
 ### Non-Goals
-- **No content generation.** Shortstop edits what was recorded; it does not write scripts, generate B-roll, add stock footage, or invent narration.
-- **No captions/subtitles by default.** Burned-in captions are a likely *next* feature but are **out of scope for v1** (logged in Open Questions — the transcript needed already exists, so this is cheap to add later).
-- **No music, transitions, or motion graphics by default.** v1 cuts and renders the existing footage. Stylistic overlays come from the reference-matching layer only if the reference itself implies them, and even then only simple ones (see Open Questions).
-- **No multi-clip assembly.** v1 processes one raw clip → one short. Stitching multiple takes into one video is out of scope.
-- **No upload/posting.** Shortstop produces a file. It does not post to TikTok/Reels/Shorts.
-- **No cloud transcription/render by default.** Everything runs locally (privacy + no API cost for the heavy steps). Cloud Whisper is an Open Question fallback for low-power machines.
-- **No cross-platform support in v1.** Linux only. macOS/Windows are explicitly out of scope; no effort is spent abstracting OS differences.
-- **No GPU requirement.** Must run on a CPU-only machine; GPU is an optimization, not a dependency.
+- **No content generation.** Shortstop edits what was recorded; no scripts, B-roll, stock footage, or narration.
+- **No music, transitions, or motion graphics.** v1 output is hard cuts (the standard Shorts jump-cut aesthetic), captions, and reframing. Nothing else.
+- **No multi-clip assembly.** One raw clip → one short.
+- **No upload/posting.** Shortstop produces a file.
+- **No cloud anything.** Transcription, tracking, and rendering are fully local — no API keys, no privacy questions, no network dependency after bootstrap. (Decision Record #7.)
+- **No cross-platform support in v1.** Linux only.
+- **No GPU requirement.** CPU-only is the baseline; GPU is never assumed.
 - **No real-time / streaming.** Batch processing of recorded files only.
+- **No raw inputs over ~20 minutes.** Enforced at probe with a clear rejection message (Decision Record #6). This guarantees the transcript fits a single Claude context window — no chunking machinery in v1.
 
 ---
 
 ## 3. Architecture
 
+### Control flow — Claude is the orchestrator
+
+The skill's `SKILL.md` is a playbook **Claude follows in-session**. Claude runs each deterministic stage as a subprocess, reads its artifact, and performs the two judgment steps itself (cut decisions, QA gap fixes) using the versioned prompts in `prompts/`. **No script ever invokes Claude** — there is no `claude -p` subprocess, no API key, no hidden LLM cost. This is the inverse of v1's design and is load-bearing: it is the only way a skill gets LLM judgment for free inside the user's existing session.
+
 ### Pipeline (stage diagram)
 
 ```
-                            ┌──────────────────────────────────────────────┐
-   input/raw.mp4  ───────▶  │  STAGE 0 — PROBE                              │
-   (user drop)              │  ffprobe → source fps, resolution,           │
-                            │  duration, audio codec/sample rate           │
-                            └───────────────┬──────────────────────────────┘
-                                            │ probe.json
-                                            ▼
-                            ┌──────────────────────────────────────────────┐
-                            │  STAGE 1 — TRANSCRIBE                         │
-                            │  faster-whisper → word-level timestamps      │
-                            └───────────────┬──────────────────────────────┘
-                                            │ transcript.json
-                                            ▼
-                            ┌──────────────────────────────────────────────┐
-                            │  STAGE 2 — SILENCE MAP                        │
-                            │  ffmpeg silencedetect → [start,end] dead air │
-                            └───────────────┬──────────────────────────────┘
-                                            │ silence.json
-                                            ▼
-                            ┌──────────────────────────────────────────────┐
-                            │  STAGE 3 — CUT DECISIONS (Claude)            │
-                            │  transcript + silence → reason about         │
-                            │  filler / pauses / retakes → EDL             │
-                            └───────────────┬──────────────────────────────┘
-                                            │ edl.json   (keep-segments)
-                                            ▼
-                            ┌──────────────────────────────────────────────┐
-                            │  STAGE 4 — RENDER (Remotion)                 │
-                            │  build timeline from EDL, render at          │
-                            │  SOURCE fps + resolution, mux normalized     │
-                            │  audio                                       │
-                            └───────────────┬──────────────────────────────┘
-                                            │ candidate.mp4
-                                            ▼
-              ┌──────────────▶ ┌──────────────────────────────────────────┐
-              │   fix loop     │  STAGE 5 — QA (compare vs reference)     │
-              │  (≤ N retries) │  duration · pacing · audio · cut density │
-              │                │  · visual diff  →  PASS / GAP list       │
-              │                └───────────────┬──────────────────────────┘
-              │                                │ qa_report.json
-              │         GAP (adjust EDL/params)│ PASS
-              └────────────────────────────────┤
-                                               ▼
-                            ┌──────────────────────────────────────────────┐
-                            │  DELIVER → output/<name>.mp4                  │
-                            │  (+ QA_REPORT.md if unconverged)             │
-                            └──────────────────────────────────────────────┘
+ input/raw.mp4 ──▶ STAGE 0 — PROBE & NORMALIZE          probe.mjs        probe.json
+                   ffprobe: rational fps, dims, rotation,
+                   VFR detection, audio streams, duration.
+                   Rejects >20 min. Pre-transcodes to CFR
+                   H.264 intermediate ONLY if VFR / rotated /
+                   exotic codec.
+                        │
+        ┌───────────────┼─────────────────┐        (1, 2, 3 are independent — Claude
+        ▼               ▼                 ▼          may run them in parallel)
+ STAGE 1 — TRANSCRIBE  STAGE 2 — SILENCE  STAGE 3 — TRACK
+ faster-whisper,       auto-calibrated    YuNet face detect @5 fps,
+ word timestamps       silencedetect      smoothed 9:16 crop path,
+ transcribe.py         silence.mjs        blur-pad fallback flag
+ transcript.json       silence.json       track.py → track.json
+        └───────────────┼─────────────────┘
+                        ▼
+                   STAGE 4 — CUT DECISIONS         ← CLAUDE (in-session,
+                   transcript + silence → keep/      prompts/cut_decisions.md)
+                   remove reasoning → draft EDL →
+                   build_edl.mjs validates, pads,
+                   snaps to silence midpoints      edl.json
+                        │
+                        ▼
+                   STAGE 5 — CAPTIONS               build_captions.mjs
+                   kept words mapped to output
+                   timeline → karaoke .ass          captions.ass
+                        │
+                        ▼
+                   STAGE 6 — RENDER (ffmpeg)        render.mjs
+                   pass A: cuts+concat+micro-fades → mezzanine
+                   pass B: tracked crop + scale +
+                   captions burn + 2-pass loudnorm  candidate_a<N>.mp4
+                        │
+                        ▼
+              ┌──▶ STAGE 7 — QA MEASURE             qa.mjs (deterministic)
+   fix loop   │    absolute gates + reference
+  (≤ 5 fixes, │    style tolerances                 qa_report_a<N>.json
+   Claude     │         │
+   decides    │    GAP  │  PASS
+   the fix)   └─────────┤
+                        ▼
+                   DELIVER → output/<stem>-<runid>.mp4
+                   (+ QA_REPORT.md if soft gaps remain;
+                    hard gaps ⇒ report only, no delivery)
 ```
 
 ### Data-flow & artifact contracts
 
-Every stage reads the previous artifact and writes its own into `runs/<run-id>/`. The run directory is the durable record; `output/` only ever receives the final `.mp4` (plus a report on failure).
+Every stage writes into `runs/<run-id>/` in the **host project's working directory** (run-id = `YYYYMMDD-HHmmss-<4char>`). `output/` only ever receives final deliverables.
 
-| # | Artifact | Producer | Consumer(s) | Format | Contract (key fields) |
-|---|----------|----------|-------------|--------|-----------------------|
-| 0 | `probe.json` | Stage 0 (ffprobe) | 4, 5 | JSON | `{ fps_num, fps_den, fps, width, height, duration_s, audio_codec, sample_rate, channels, has_audio }` — fps stored as a **rational** (num/den) to preserve exact NTSC rates like 30000/1001. |
-| 1 | `transcript.json` | Stage 1 (Whisper) | 3, 5 | JSON | `{ language, duration_s, segments: [{ id, start, end, text, words: [{ word, start, end, prob }] }] }` — **word-level** timestamps mandatory; `prob` is confidence. |
-| 2 | `silence.json` | Stage 2 (ffmpeg) | 3, 4 | JSON | `{ threshold_db, min_silence_s, regions: [{ start, end, dur }] }` — sorted, non-overlapping, in source-time seconds. |
-| 3 | `edl.json` | Stage 3 (Claude) | 4, 5 | JSON | **Keep-list, not cut-list.** `{ source: "input/raw.mp4", keep: [{ start, end, reason }], removed: [{ start, end, kind, reason }], target_fps: "<rational>", notes }`. `keep` segments are sorted, non-overlapping, snapped to word/silence boundaries. Audio cross-fade hint per junction. |
-| 4 | `candidate.mp4` | Stage 4 (Remotion) | 5 | MP4 (H.264/AAC) | Rendered at `probe.fps`, `probe.width×height`; concatenation of `edl.keep` with short audio cross-fades at junctions; normalized loudness. |
-| 5 | `qa_report.json` | Stage 5 (QA) | deliver / fix loop | JSON | `{ verdict: "pass"\|"gap", attempt, scores: {...}, gaps: [{ signal, observed, target, severity, suggested_fix }], reference: "reference/ref.mp4" }` |
-| — | `output/<name>.mp4` | Deliver | user | MP4 | Final artifact. Byte-for-byte = the passing `candidate.mp4`. |
-| — | `QA_REPORT.md` | Deliver (failure only) | user | Markdown | Human-readable explanation when QA cannot converge within the ceiling. |
+| # | Artifact | Producer | Consumer(s) | Contract (key fields) |
+|---|----------|----------|-------------|------------------------|
+| 0 | `probe.json` | Stage 0 | 1,2,3,4,6,7 | `{ fps_num, fps_den, fps, width, height, rotation, display_width, display_height, duration_s, vfr, normalized_path\|null, audio_streams: [{index, codec, sample_rate, channels}], audio_source }` — fps as **rational**; `display_*` are rotation-corrected; `normalized_path` set when a CFR intermediate was produced (all downstream stages then read it instead of the raw file); `audio_source` records the mixdown decision (`"mix"` or a stream index). |
+| 1 | `transcript.json` | Stage 1 | 4,5,7 | `{ language, duration_s, segments: [{ id, start, end, text, words: [{ word, start, end, prob }] }] }` — word-level timestamps mandatory. |
+| 2 | `silence.json` | Stage 2 | 4 | `{ noise_floor_db, threshold_db, min_silence_s, regions: [{ start, end, dur }] }` — sorted, non-overlapping, source-time seconds; calibration values recorded. |
+| 3 | `track.json` | Stage 3 | 6,7 | `{ mode: "face"\|"fallback", sample_fps, detections: [{ t, cx, cy, w, h, conf }], crop_path: [{ t, x, y }], crop_w, crop_h, coverage }` — `crop_path` is the **smoothed** per-keyframe top-left of the 9:16 window in source pixels; `coverage` = fraction of sampled frames with a confident detection. |
+| 4 | `edl.json` | Stage 4 | 5,6,7 | **Keep-list.** `{ source, keep: [{ start, end, reason }], removed: [{ start, end, kind, reason }], notes }` — sorted, non-overlapping, padded, snapped to silence midpoints (see §5.5). |
+| 5 | `captions.ass` | Stage 5 | 6 | ASS subtitles in **output time**, one Dialogue per caption line, karaoke `\k` tags per word, style from config. |
+| 6 | `candidate_a<N>.mp4` | Stage 6 | 7 | One per QA attempt N (0 = first render). H.264/AAC, 1080×1920 (or source aspect), CFR. |
+| 7 | `qa_report_a<N>.json` | Stage 7 | Claude / deliver | `{ verdict: "pass"\|"gap", attempt, score, signals: {...}, gaps: [{ signal, severity: "hard"\|"soft", observed, target, suggested_fix }] }` |
+| — | `output/<stem>-<runid>.mp4` | Deliver | user | Byte-for-byte the best passing candidate. Never clobbers prior edits. |
+| — | `output/<stem>-<runid>.QA_REPORT.md` | Deliver | user | Written when soft gaps remain at the ceiling, or alone (no mp4) when hard gaps block delivery. |
 
-**Design rule — keep-list over cut-list.** The EDL stores the segments to *keep*, not to remove. This makes Stage 4 a pure concatenation (no gap arithmetic) and makes "did we accidentally drop content?" a trivial coverage check (sum of keep durations vs. expected).
+**Design rule — keep-list over cut-list.** The EDL stores segments to *keep*. Stage 6 is pure concatenation; coverage is a trivial sum.
 
-**Design rule — source-time everywhere.** All timestamps in artifacts 1–3 are in **source seconds** (floats). Frame conversion happens once, inside Stage 4, using the exact rational fps from `probe.json`. Nothing upstream ever reasons in frames.
+**Design rule — source-time everywhere.** All timestamps in artifacts 1–4 are source seconds (floats). Conversion to output time happens in exactly two places: `build_captions.mjs` (word → output time) and `render.mjs` (crop path → output time), both via `lib/timecode.mjs` using the exact rational fps.
+
+**Design rule — one snapping authority.** All boundary padding/snapping happens in `build_edl.mjs` and nowhere else. Stages 5–6 treat `edl.json` boundaries as final.
 
 ---
 
 ## 4. Repository / Folder Layout
 
+The repo is the **dev workspace**; `skill/` is the **distributable** — the folder a user copies (or symlinks) to `<project>/.claude/skills/shortstop/` or `~/.claude/skills/shortstop/`. There is no separate slash-command file: the skill itself is discoverable and invocable (`/shortstop`, or natural language: "edit this clip", "make a short from input/take3.mp4").
+
 ```
-shortstop/
-├── README.md                      # Quickstart: drop clip → /editor → done
-├── PLAN.md                        # This file
-├── SKILL.md                       # Claude Code skill manifest (name, description, when-to-use)
+shortstop/                          # dev repo
+├── README.md                       # Quickstart: install skill → drop clip → invoke → done
+├── PLAN.md                         # This file
 │
-├── .claude/
-│   └── commands/
-│       └── editor.md              # /editor slash command → drives the pipeline orchestrator
+├── skill/                          # ───── THE DISTRIBUTABLE SKILL FOLDER ─────
+│   ├── SKILL.md                    # Manifest + orchestration playbook (see annotation)
+│   ├── package.json                # Node deps: ffmpeg-static, ffprobe-static, execa, ajv
+│   ├── .nvmrc                      # Node ≥ 20
+│   │
+│   ├── config/
+│   │   ├── default.config.json     # All tunables (see §4.1); user overrides via
+│   │   │                           #   <project>/shortstop.config.json (merged over defaults)
+│   │   └── config.schema.json
+│   │
+│   ├── scripts/
+│   │   ├── bootstrap.mjs           # First-run setup (§6); writes .shortstop-ready
+│   │   ├── doctor.mjs              # Dependency health check, actionable fixes
+│   │   ├── probe.mjs               # Stage 0 — probe + conditional normalize
+│   │   ├── transcribe.py           # Stage 1 — faster-whisper
+│   │   ├── silence.mjs             # Stage 2 — auto-calibrated silencedetect
+│   │   ├── track.py                # Stage 3 — YuNet face track → crop path
+│   │   ├── build_edl.mjs           # Stage 4 validator — pad, snap, reject, coverage
+│   │   ├── build_captions.mjs      # Stage 5 — EDL+transcript → captions.ass
+│   │   ├── render.mjs              # Stage 6 — ffmpeg pass A + pass B + assertions
+│   │   ├── qa.mjs                  # Stage 7 — measure candidate vs gates+reference
+│   │   └── lib/
+│   │       ├── spawn.mjs           # execa array-spawn wrapper (no shell strings)
+│   │       ├── ffmpeg.mjs          # locate/validate ffmpeg+ffprobe; shared audio-source
+│   │       │                       #   resolution (same mixdown for whisper & render)
+│   │       ├── venv.mjs            # locate python, manage .venv invocations
+│   │       ├── timecode.mjs        # rational fps ↔ frames ↔ seconds (single source of truth)
+│   │       └── artifacts.mjs       # schema-validated read/write of every artifact
+│   │
+│   ├── prompts/
+│   │   ├── cut_decisions.md        # Stage 4 prompt template Claude applies to itself
+│   │   └── qa_gap_fix.md           # Fix-loop prompt template
+│   │
+│   ├── schemas/                    # probe, transcript, silence, track, edl, qa_report
+│   │   └── *.schema.json
+│   │
+│   ├── assets/
+│   │   └── fonts/CaptionFont.ttf   # Bundled OFL font (e.g. Montserrat Bold) for libass
+│   │
+│   └── (created by bootstrap, gitignored:)
+│       ├── node_modules/  .venv/  models/yunet.onnx  models/whisper/  .shortstop-ready
 │
-├── input/                         # User drops raw clips here (watched dir)
-│   └── .gitkeep
-├── output/                        # Finished .mp4s delivered here
-│   └── .gitkeep
-├── reference/                     # User's style/pacing target clip(s) for QA
-│   └── .gitkeep
-├── runs/                          # Per-run intermediate artifacts (probe/transcript/silence/edl/qa)
-│   └── .gitkeep                   #   runs/<run-id>/{probe,transcript,silence,edl,qa_report}.json + candidate.mp4
+├── tests/                          # dev-only, not shipped
+│   ├── fixtures/                   # generated tiny clips + golden artifacts (§4.2)
+│   ├── fixtures.mjs                # fixture generator (espeak-ng + ffmpeg, see §4.2)
+│   └── *.test.mjs                  # per-stage unit tests + e2e smoke test
 │
-├── config/
-│   ├── shortstop.config.json      # User-tunable defaults (silence thresh, fillers, QA tolerances, model size)
-│   └── shortstop.config.schema.json  # JSON Schema validating the above; bootstrap checks against it
-│
-├── scripts/                       # Deterministic, language-agnostic pipeline stages (Node + Python)
-│   ├── bootstrap.mjs              # First-run self-setup: detect/install ffmpeg, Whisper, Node deps; write .shortstop-ready
-│   ├── doctor.mjs                 # `shortstop doctor` — checks all deps, prints actionable fixes
-│   ├── probe.mjs                  # Stage 0 — ffprobe → probe.json
-│   ├── transcribe.py             # Stage 1 — faster-whisper → transcript.json
-│   ├── silence.mjs                # Stage 2 — ffmpeg silencedetect → silence.json
-│   ├── build_edl.mjs              # Stage 3 helper — assembles Claude's decision into validated edl.json
-│   ├── render.mjs                 # Stage 4 — invokes Remotion CLI with EDL + probe → candidate.mp4
-│   ├── qa.mjs                     # Stage 5 — compares candidate vs reference → qa_report.json
-│   ├── orchestrate.mjs            # Top-level driver: runs stages 0→5, owns the fix loop, calls Claude for stage 3
-│   └── lib/
-│       ├── platform.mjs           # Path resolution + shell-safe array-spawn wrapper (Linux)
-│       ├── ffmpeg.mjs             # Locate/validate ffmpeg & ffprobe; wrap invocations
-│       ├── whisper.mjs            # Locate Python + faster-whisper; wrap invocation
-│       ├── timecode.mjs           # Rational fps ↔ frame ↔ source-seconds conversions (single source of truth)
-│       └── artifacts.mjs          # Read/write/validate every artifact against its JSON Schema
-│
-├── remotion/                      # Remotion project (Stage 4 render engine)
-│   ├── package.json
-│   ├── remotion.config.ts
-│   ├── src/
-│   │   ├── index.ts               # registerRoot
-│   │   ├── Root.tsx               # Composition registration; dimensions/fps from CLI props
-│   │   ├── ShortstopVideo.tsx     # Timeline: <OffthreadVideo> per keep-segment, audio cross-fades
-│   │   └── schema.ts              # Zod schema for input props (edl, probe) — Remotion calculateMetadata
-│   └── tsconfig.json
-│
-├── schemas/                       # JSON Schemas for every inter-stage artifact (the contracts in §3)
-│   ├── probe.schema.json
-│   ├── transcript.schema.json
-│   ├── silence.schema.json
-│   ├── edl.schema.json
-│   └── qa_report.schema.json
-│
-├── prompts/                       # Claude prompt templates (versioned, reviewable)
-│   ├── cut_decisions.md           # Stage 3 prompt: transcript+silence → keep/remove EDL
-│   └── qa_gap_fix.md              # Fix-loop prompt: qa gaps → adjusted EDL/params
-│
-├── tests/
-│   ├── fixtures/                  # Tiny sample clips + golden artifacts for regression
-│   └── *.test.mjs                 # Per-stage unit tests + one end-to-end smoke test
-│
-├── package.json                   # Node deps (orchestrator, Remotion), npm scripts (bootstrap, doctor, edit)
-├── .nvmrc                         # Pin Node version for reproducibility
-└── .shortstop-ready               # Written by bootstrap once setup succeeds (gitignored)
+└── .github/ / CI as desired
 ```
 
-**Annotations for the load-bearing entries:**
+**Workspace dirs** (`input/`, `output/`, `reference/`, `runs/`) live in the **host project's CWD**, not inside the skill folder. The skill creates them on demand. `runs/` is pruned to `config.runs.keep_last` (default 10) after each successful delivery.
 
-- **`SKILL.md`** — the manifest Claude Code reads to know the skill exists and when to use it ("edit a raw video", "make a short", "polish this clip"). Points at `/editor`.
-- **`.claude/commands/editor.md`** — defines the `/editor` slash command. Its body instructs Claude to run `scripts/orchestrate.mjs` against the newest file in `input/` (or a named file), surface progress, and handle the one interactive moment (Stage 3 cut reasoning).
-- **`scripts/orchestrate.mjs`** — the spine. Pure stages run as subprocesses; the single AI step (Stage 3) and the fix loop are where Claude is invoked. Deterministic stages never call an LLM.
-- **`remotion/`** — a self-contained Remotion project. Driven entirely by CLI props (`edl.json` + `probe.json`); no hardcoded dimensions or fps.
-- **`schemas/` + `lib/artifacts.mjs`** — the contracts in §3 made executable. Every artifact is validated on write and on read; a malformed EDL fails fast instead of producing a broken render.
-- **`prompts/`** — Claude's two jobs (cut decisions, gap fixes) live as versioned prompt files, not inline strings, so they can be tuned and diffed.
-- **`config/shortstop.config.json`** — the only thing a user edits to change behavior (how aggressive cuts are, which words count as filler, QA tolerances, Whisper model size).
+**`SKILL.md` annotation (the spine).** Frontmatter: `name: shortstop`, `description:` covering the trigger phrases ("edit a raw video", "make a short", "polish this clip", clip dropped in `input/`). Body is the playbook Claude executes:
+1. If `.shortstop-ready` missing → run `bootstrap.mjs`, streaming progress ("one-time setup").
+2. **Fail fast on prerequisites**: abort immediately (before any heavy work) if `reference/` has no video, with instructions to add a style-exemplar clip.
+3. Resolve the target clip (named file, else newest in `input/`). Create run dir.
+4. Run Stage 0; surface rejection (>20 min, no video stream) verbatim.
+5. Run Stages 1–3 (independent — may run in parallel).
+6. **Stage 4 — Claude itself**: read `transcript.json` + `silence.json` + config, apply `prompts/cut_decisions.md`, write a draft EDL, pipe it through `build_edl.mjs`; on validation rejection, repair and retry (max 2 repairs, then abort with the validator's message).
+7. If `--review-edl` (or the user asked to review): present the removed-segments table (timestamp, kind, reason) and wait for approval.
+8. Run Stages 5–6, then Stage 7.
+9. **QA loop — Claude decides fixes** (§8): deterministic remediations first, judgment fixes via `prompts/qa_gap_fix.md`, ≤ 5 fix attempts, score-based no-progress guard.
+10. Deliver per §8 rules; report the outcome with the cut summary (n cuts, time removed, final duration); prune old runs.
+
+### 4.1 Config surface (`default.config.json`)
+
+```jsonc
+{
+  "input":    { "max_minutes": 20 },
+  "whisper":  { "model": "small", "language": "auto" },
+  "silence":  { "auto_calibrate": true, "offset_db": 10, "min_silence_s": 0.5,
+                "fallback_threshold_db": -30 },
+  "cut":      { "fillers": ["um","uh","like","you know","sort of","kind of","I mean"],
+                "max_pause_s": 0.8, "pad_s": 0.1, "aggressiveness": "normal",
+                "target_duration_s": null },
+  "aspect":   { "mode": "9:16", "no_face_fallback": "blur-pad",   // or "center-crop"
+                "out_width": 1080, "out_height": 1920 },
+  "captions": { "enabled": true, "max_words_per_line": 4, "max_line_s": 1.6,
+                "font": "CaptionFont", "size": 96, "margin_v": 420,
+                "primary_color": "&H00FFFFFF", "highlight_color": "&H0000D7FF",
+                "outline": 5 },
+  "audio":    { "target_lufs": -14, "true_peak_db": -1, "track": "mix",  // or stream index
+                "junction_fade_s": 0.01 },
+  "render":   { "crf": 18, "preset": "medium", "mezzanine_crf": 12 },
+  "qa":       { "max_fix_attempts": 5, "duration_tolerance_frames": 1,
+                "lufs_tolerance": 2, "shorts_max_s": 180,
+                "pacing_tolerance": 0.5, "framing_tolerance": 0.15,
+                "verify_transcript": false },
+  "runs":     { "keep_last": 10 }
+}
+```
+
+### 4.2 Test fixtures (generated, not sourced)
+
+`tests/fixtures.mjs` builds every fixture deterministically so Phases 2–9 are testable one-shot:
+- **Speech fixtures:** `espeak-ng` renders scripted lines containing planted filler ("um", a false start, a retake) to WAV; known silences are inserted with ffmpeg `apad`/`anullsrc` concat. Ground-truth cut points are therefore known by construction.
+- **Video track:** ffmpeg `testsrc2` for non-face fixtures; for tracking fixtures, a CC0 face photo animated with `zoompan` (slow horizontal drift) muxed over the speech WAV — gives YuNet a real face with a known motion path.
+- **Pathological fixtures:** a VFR clip (`-vsync vfr` re-encode), a rotated clip (`-metadata:s:v rotate=90`), a 21-minute clip (assembled via stream-copy concat, for the cap test), a 29.97 NTSC clip.
+- A small real reference clip fixture for QA tests (any CC0 short-form clip, committed at low resolution).
 
 ---
 
 ## 5. Component Specs
 
-### 5.1 Stage 0 — Probe
+### 5.1 Stage 0 — Probe & Normalize
 
 | | |
 |---|---|
-| **Responsibility** | Extract exact technical metadata from the raw clip so every downstream stage preserves it. |
-| **Tool** | `ffprobe` (ships with ffmpeg). Chosen because it reports the **exact rational frame rate** (`r_frame_rate`), avoiding the 29.97-rounded-to-30 class of bug. |
-| **Consumes** | `input/<raw>.{mp4,mov,mkv,webm}` |
-| **Emits** | `runs/<id>/probe.json` (contract in §3) |
-| **Key params** | `ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate,width,height -show_entries format=duration -of json` plus an audio-stream query for codec/sample-rate/channels. |
-| **Claude?** | No. Pure deterministic. |
-| **Notes** | Parse `r_frame_rate` as `num/den` and store both the rational and the float. **Assumption:** input is a single-video-stream file; multi-stream files use stream 0. Reject files with no video stream early with a clear error. |
+| **Responsibility** | Extract exact technical metadata; detect and repair the three real-world input hazards (VFR, rotation, exotic codecs); enforce the 20-minute cap; resolve the audio source. |
+| **Tool** | `ffprobe` for metadata; `ffmpeg` for the conditional normalize pass. |
+| **Emits** | `probe.json`; optionally `runs/<id>/normalized.mp4`. |
+| **VFR detection** | Compare `r_frame_rate` vs `avg_frame_rate`; mismatch > 0.5% ⇒ VFR. Screen recordings (OBS) and phone footage are commonly VFR, and the source-seconds × rational-fps frame math in §3 is invalid on VFR input — so VFR ⇒ **normalize to CFR** at the nearest standard rate to `avg_frame_rate` (whitelist: 24000/1001, 24, 25, 30000/1001, 30, 50, 60000/1001, 60). |
+| **Rotation** | Read the display-matrix side data. Rotation present ⇒ normalize (bake the rotation) so all downstream pixel math uses real display dimensions. `display_width/height` in `probe.json` are always rotation-corrected. |
+| **Exotic codec** | Decode probe failure or non-H.264/HEVC/VP9/AV1 video ⇒ normalize. |
+| **Normalize pass** | Single ffmpeg re-encode: H.264 CRF 12 (near-lossless mezzanine quality), CFR via `-fps_mode cfr -r <rational>`, autorotate baked, audio stream-copied. `probe.json.normalized_path` points at it; **all downstream stages read it instead of the raw file**. Clean inputs skip this entirely (fast path — Decision Record #12). |
+| **Audio source** | Multi-audio-stream inputs (OBS mic + system audio) are resolved here once: `config.audio.track` = `"mix"` (default — `amix` all streams) or a stream index. The decision is recorded as `probe.audio_source` and **`lib/ffmpeg.mjs` applies the identical mixdown for both Whisper extraction and the render**, so Claude cuts what the viewer hears. |
+| **Cap & rejection** | Duration > `config.input.max_minutes` ⇒ exit non-zero with a one-line user-facing message. Same for no-video-stream inputs. **Assumption:** single video stream; multi-stream uses `v:0`. |
 
 ### 5.2 Stage 1 — Transcription
 
 | | |
 |---|---|
-| **Responsibility** | Produce a word-level, timestamped transcript that Stage 3 reasons over and Stage 5 uses to verify content survival. |
-| **Tool** | **`faster-whisper`** (CTranslate2 reimplementation of OpenAI Whisper). Chosen over reference `openai-whisper` because it is **4–5× faster on CPU**, uses less RAM, runs CPU-only (no GPU dependency, per Non-Goals), and exposes word-level timestamps. Default model **`small`** (good accuracy/speed balance for clean talking-head audio); configurable to `base`/`medium`. |
-| **Consumes** | `input/<raw>` (ffmpeg extracts a 16 kHz mono WAV internally first) |
-| **Emits** | `runs/<id>/transcript.json` (contract in §3) with `word_timestamps=True` |
-| **Key params** | `model_size` (config), `word_timestamps=True`, `vad_filter=True` (Silero VAD trims hallucinated text in silence), `language` (auto-detect, overridable), `beam_size=5`. |
-| **Claude?** | No. Deterministic ML inference. |
-| **Notes** | **Assumption:** primarily English/single-speaker talking-head or screen-rec narration. faster-whisper is a Python package → this is the one stage that requires a Python runtime (see §6). Word `prob` (confidence) is preserved and surfaced to Stage 3 so Claude can treat low-confidence regions cautiously. |
+| **Responsibility** | Word-level, timestamped transcript for Stage 4 reasoning and caption generation. |
+| **Tool** | **`faster-whisper`** (CTranslate2): 4–5× faster than reference Whisper on CPU, word timestamps, no GPU. Default model `small`, configurable. Local-only — no cloud fallback (Decision Record #7). |
+| **Emits** | `transcript.json`. |
+| **Key params** | `word_timestamps=True`, `vad_filter=True` (Silero VAD suppresses hallucinated text in silence), `beam_size=5`, language auto-detect. Audio input: 16 kHz mono WAV extracted via the shared audio-source mixdown. |
+| **Notes** | Word `prob` is preserved so Stage 4 treats low-confidence regions cautiously. **Whisper word timestamps carry ±50–200 ms slop, worst at word ends** — this is why `build_edl.mjs` pads and snaps to silence midpoints rather than trusting `word.end` (§5.5). The 20-min cap guarantees single-window Stage 4 — no chunking. |
 
-### 5.3 Stage 2 — Silence Map
+### 5.3 Stage 2 — Silence Map (auto-calibrated)
 
 | | |
 |---|---|
-| **Responsibility** | Find every region of dead air so Stage 3 can cut pauses and Stage 4 can snap cuts to silence (click-free edits). |
-| **Tool** | `ffmpeg -af silencedetect`. Chosen because it is already a dependency, deterministic, and fast (single audio pass). |
-| **Consumes** | `input/<raw>` audio |
-| **Emits** | `runs/<id>/silence.json` (contract in §3) |
-| **Key params** | `silencedetect=noise=<threshold_db>:d=<min_silence_s>` — defaults `noise=-30dB`, `d=0.6s` (config-tunable). Parse `silence_start`/`silence_end` lines from stderr into regions. |
-| **Claude?** | No. |
-| **Notes** | The silence map is advisory to Stage 3 (Claude decides *whether* a given pause is a real cut point or natural breath) and authoritative to Stage 4 (cuts snap to the nearest silence edge within a tolerance window to avoid clipping speech). |
+| **Responsibility** | Find dead-air regions; calibrate the threshold to the clip's actual noise floor so quiet rooms, fans, and laptop mics all work without manual tuning. |
+| **Tool** | `ffmpeg astats` (calibration) + `silencedetect` (detection). |
+| **Emits** | `silence.json` (calibration values recorded for debuggability). |
+| **Calibration** | Measure per-window RMS over the clip (e.g. `astats=metadata=1:reset=1` at 0.5 s windows); noise floor = a low percentile (p10) of window RMS; threshold = `floor + config.silence.offset_db` (default +10 dB), clamped to [−50, −20] dB. If calibration fails (e.g. wall-to-wall music), fall back to `fallback_threshold_db` and record `"calibrated": false`. |
+| **Empty-map fallback** | If zero silences are detected (continuous background noise/music), Stage 4 is told explicitly: cuts then rely on word boundaries + padding only, and `build_edl.mjs` skips silence-snapping. The QA report notes the degraded mode. |
 
-### 5.4 Stage 3 — Cut Decisions (the AI step)
+### 5.4 Stage 3 — Subject Track (reframe path)
 
 | | |
 |---|---|
-| **Responsibility** | Decide what to remove (filler words, long pauses, false starts, abandoned retakes, rambles) and emit a validated **keep-list EDL**. |
-| **Tool** | **Claude**, invoked by the orchestrator with `prompts/cut_decisions.md`. This is the only stage where judgment beats rules — distinguishing "a deliberate dramatic pause" from "dead air," or "the second, better take" from "the first abandoned one," is exactly an LLM-shaped problem. |
-| **Consumes** | `transcript.json` + `silence.json` + relevant `config` (filler list, aggressiveness, target duration if any) |
-| **Emits** | Claude returns a structured keep/remove decision → `build_edl.mjs` validates, snaps boundaries to word/silence edges, and writes `runs/<id>/edl.json`. |
-| **Claude invocation — the prompt MUST contain:** | 1. **Role**: senior short-form video editor. 2. **The transcript** with word-level timestamps and confidence. 3. **The silence map**. 4. **Explicit cut rules**: remove filler (`um, uh, like, you know, …` from config), pauses > `max_pause_s`, false starts (repeated/abandoned sentence stems), and clear retakes (keep the last clean attempt). 5. **Hard constraints**: output **keep-segments only**, sorted, non-overlapping, snapped to word boundaries; never cut mid-word; preserve meaning and natural cadence; do not remove content for length unless a target is set. 6. **Output contract**: strict JSON matching `edl.schema.json`, each removal tagged with `kind` + one-line `reason`. 7. **"Only cut what the rules justify. When unsure, keep it."** (bias against over-cutting — see Risks). |
-| **Notes** | Claude returns *decisions*, never frame math. `build_edl.mjs` is the deterministic guardrail: it rejects overlapping/out-of-order/mid-word segments and recomputes a content-coverage figure. **Assumption:** transcripts fit in one context window for typical short-form raw clips (≤ ~20 min); longer clips are chunked by silence-bounded windows (logged in Open Questions). |
+| **Responsibility** | Produce the smoothed 9:16 crop path that keeps the speaker framed (Decision Record #3: tracking in v1). |
+| **Tool** | **OpenCV YuNet face detector** (`cv2.FaceDetectorYN`, tiny ONNX model ~230 KB, CPU-fast, arm64-safe) inside the existing Python venv — chosen over mediapipe for wheel availability and footprint. `bootstrap.mjs` downloads the model to `models/yunet.onnx`. |
+| **Emits** | `track.json`. |
+| **Algorithm** | 1) Decode at `sample_fps=5`. 2) Detect; pick the **largest** face, with stickiness (prefer the face nearest the previous pick — prevents flicker between two people). 3) Gaps ≤ 2 s: linear interpolate; longer: hold last position. 4) Smooth the center path: dead-zone (crop doesn't move while the face center stays within the central 20% of the crop) + critically-damped ease toward the target when it exits — eliminates per-frame jitter. 5) Clamp crop to frame; round x/y to even pixels (yuv420). 6) Crop geometry: `crop_h = display_height`, `crop_w = crop_h * 9/16`. |
+| **Fallback** | `coverage < 0.5` (screen recordings, slides) ⇒ `mode: "fallback"`: render uses `config.aspect.no_face_fallback` (`blur-pad`: full frame scaled into 1080×1920 over a blurred, zoomed copy of itself; or `center-crop`). |
+| **Notes** | Tracking runs **once on the full source**, before cut decisions — QA re-renders never re-track. Whole-clip cost at 5 fps is minutes-scale worst case on CPU for a 20-min input. **Assumption / doc note:** a 1080p 16:9 source yields a 607×1080 crop upscaled ~1.8× (lanczos) — acceptable for v1; README recommends ≥1440p/4K sources for native-sharp crops. `aspect.mode: "source"` skips this stage entirely. |
 
-### 5.5 Stage 4 — Render
-
-| | |
-|---|---|
-| **Responsibility** | Turn the keep-list EDL into a finished `.mp4` at the source's exact fps and resolution, with clean audio at every junction. |
-| **Tool** | **Remotion** (React-based programmatic video). Chosen per the product spec; it gives deterministic, code-defined timelines and frame-exact control. fps and dimensions come from `probe.json` via `calculateMetadata`, never hardcoded. |
-| **Consumes** | `edl.json` + `probe.json` + `input/<raw>` |
-| **Emits** | `runs/<id>/candidate.mp4` |
-| **How it works** | `Root.tsx` registers a composition whose `fps`/`width`/`height` are derived from `probe.json`. `ShortstopVideo.tsx` lays each `keep` segment as an `<OffthreadVideo>` with `startFrom`/`endAt` computed by `lib/timecode.mjs` from source-seconds × exact fps. Junctions get short (≈40 ms) audio cross-fades to kill clicks. Render via `npx remotion render` with `--props` carrying the EDL+probe, `--codec h264`. **Audio loudness normalization** (EBU R128, `loudnorm`) is applied as an ffmpeg post-pass on the muxed output (Remotion renders the cut; ffmpeg normalizes — simpler than doing loudness inside React). |
-| **Key params** | fps = `probe.fps` (rational), resolution = source, `--codec h264`, CRF/quality from config, audio cross-fade duration, `loudnorm` target `-14 LUFS` (standard for social). |
-| **Claude?** | No. |
-| **Notes** | **fps preservation is non-negotiable** and is asserted post-render: `ffprobe` the candidate and fail the stage if its `r_frame_rate` ≠ source. **Assumption:** Remotion's `<OffthreadVideo>` handles the source codec; if a source needs transcoding to a Remotion-friendly intermediate, `render.mjs` does a lossless-ish pre-transcode first (decision logged in Open Questions). |
-
-### 5.6 Stage 5 — QA Loop
+### 5.5 Stage 4 — Cut Decisions (the AI step) + `build_edl.mjs`
 
 | | |
 |---|---|
-| **Responsibility** | Compare the candidate to the reference clip, decide pass/gap, and drive auto-fixes until pass or the retry ceiling. |
-| **Tool** | `qa.mjs` (deterministic signal extraction via ffmpeg/ffprobe) + **Claude** for the fix decision when gaps exist (`prompts/qa_gap_fix.md`). Split because *measuring* is deterministic but *deciding how to close a gap* (loosen silence threshold? re-snap a cut? the cut was too aggressive?) is judgment. |
-| **Consumes** | `candidate.mp4` + `reference/<ref>.mp4` (**required** — no reference ⇒ pipeline aborts before render) + `transcript.json` (content-survival check) + `probe.json` |
-| **Emits** | `runs/<id>/qa_report.json`; on gap, an adjusted `edl.json`/params for the next attempt. |
-| **Signals** | duration ratio, pacing (cuts-per-minute / avg shot length), audio loudness & peak, cut density vs reference, coarse visual diff (see §8), content-survival (no kept words dropped). |
-| **Claude invocation — the fix prompt MUST contain:** | the gap list with observed-vs-target numbers, the current EDL, and the instruction to propose the **minimal** EDL/param change that closes the largest gap without violating cut rules — returning a new EDL plus a one-line rationale. |
-| **Claude?** | Measurement no; fix decision yes. |
-| **Notes** | Full design in §8. The loop is **bounded** and always terminates with either a delivered file or a `QA_REPORT.md`. |
+| **Responsibility** | Decide what to remove (filler, long pauses, false starts, abandoned retakes) and emit a validated keep-list EDL. |
+| **Who** | **Claude, in-session**, applying `prompts/cut_decisions.md` to `transcript.json` + `silence.json` + config. Distinguishing a dramatic pause from dead air, or the better of two takes, is an LLM-shaped problem. Claude emits *decisions in source seconds*; never frame math. |
+| **The prompt template MUST contain** | 1) Role: senior short-form editor. 2) Transcript with word timestamps + confidence. 3) Silence map (+ degraded-mode flag). 4) Cut rules: fillers from config, pauses > `max_pause_s`, false starts, retakes (keep the last clean attempt). 5) Hard constraints: keep-segments only, sorted, non-overlapping, never mid-word, preserve meaning and cadence, do not cut for length unless `target_duration_s` is set. 6) Output contract: strict JSON per `edl.schema.json`, each removal tagged `kind` + one-line `reason`. 7) **"Only cut what the rules justify. When unsure, keep it."** 8) Low-confidence words (`prob < 0.5`) are kept unless inside a silence region. |
+| **`build_edl.mjs` — the deterministic guardrail and the *only* snapping authority** | 1) Schema-validate; reject overlap/out-of-order/out-of-range. 2) **Pad** each keep boundary outward by `pad_s` (default 100 ms) — this absorbs Whisper's word-timestamp slop so syllables are never clipped. 3) **Snap** each padded boundary to the **midpoint of the nearest silence region** when one lies within the removed gap; if the gap contains no silence, keep the padded word boundary. 4) Merge keeps that now touch/overlap; drop removals shorter than 2 frames. 5) Verify every transcript word is either fully inside a keep or fully inside a removal (no straddling). 6) Emit coverage stats (kept %, removed % by kind). On rejection, print a machine-readable reason — Claude repairs and resubmits (max 2 repairs). |
+
+### 5.6 Stage 5 — Captions
+
+| | |
+|---|---|
+| **Responsibility** | Word-level karaoke captions, on by default (Decision Record #2). |
+| **Tool** | `build_captions.mjs` → ASS (libass), burned in Stage 6 via the `subtitles` filter. ASS karaoke `\k` tags give the per-word highlight pop without any browser/renderer dependency. |
+| **Emits** | `captions.ass` in **output time**: for each kept word, `out_t = word.start − keep.start + Σ(prior keep durations)` via `lib/timecode.mjs`. |
+| **Line grouping** | Break lines at: `max_words_per_line` (default 4), `max_line_s` (1.6 s), sentence punctuation, or a crossed cut junction. Style from config: bundled bold font (registered via `subtitles=...:fontsdir=assets/fonts` — never depends on system fonts), white fill + black outline, highlight color on the active word, `Alignment=2` bottom-center with `MarginV=420` (clear of the Shorts UI overlay zone). |
+| **Notes** | `captions.enabled: false` skips the stage and the burn filter. Captions are regenerated per QA attempt only if the EDL changed. |
+
+### 5.7 Stage 6 — Render (ffmpeg, two passes)
+
+| | |
+|---|---|
+| **Responsibility** | EDL + crop path + captions → candidate mp4. ffmpeg-only (Decision Record #1): no Chromium, no license, exact rational fps, fastest CPU path. |
+| **Pass A — cut & concat (mezzanine)** | One `filter_complex`: per keep-segment `trim/setpts` + `atrim/asetpts`, **micro-fades** `afade=in:d=0.01` / `afade=out` at each segment's audio edges (10 ms — kills clicks without borrowing audio from removed regions; cuts already land in silence, so nothing audible is lost and `duration == Σkeep` stays exact), then `concat=n=K:v=1:a=1`. Encode: H.264 CRF 12 + PCM audio in MKV (mezzanine — no AAC double-encode). |
+| **Pass B — finish** | Video: dynamic crop via **per-output-frame `sendcmd`** file generated from `track.json` remapped source→output time (`sendcmd=f=crop.cmd,crop@dyn=...`), `scale=1080:1920:flags=lanczos`, `subtitles=captions.ass:fontsdir=...`. (Fallback mode: blur-pad graph instead of crop.) Audio: **two-pass `loudnorm`** — measure pass (`print_format=json`) then apply pass with `measured_*` values (linear normalization, no pumping), followed by `aresample=<source_rate>` (loudnorm upsamples to 192 kHz internally). Encode: H.264 `crf`/`preset` from config, AAC, `+faststart`. |
+| **Incremental re-render** | QA fixes that change only audio params or captions re-run **pass B only**; EDL changes invalidate both passes. |
+| **Post-render assertions (fail the stage, not QA)** | `ffprobe` the candidate: fps rational == expected, dims == 1080×1920 (or source), `duration == Σkeep ± 1 frame`, audio stream present at source sample rate. |
+
+### 5.8 Stage 7 — QA Measure
+
+Deterministic measurement only (`qa.mjs`); gap *decisions* are Claude's, in the loop (§8). Consumes `candidate_a<N>.mp4`, the cached reference signals, `edl.json`, `track.json`, `probe.json`.
+
+The **reference clip is required** (Decision Record #4): the playbook aborts at invocation start if `reference/` is empty. Reference signals (pacing, cut density, loudness character) are computed once and cached in `reference/.shortstop-cache/<content-hash>.json`. The reference is a *style exemplar*: it tunes **soft tolerances only**. It is **never** compared on duration — edit duration is determined by the raw footage's content, not by an unrelated clip (this was the v1 flaw; see Decision Record).
 
 ---
 
 ## 6. Environment & Setup (Linux)
 
-Target: **Linux only** (v1). The orchestrator and all `.mjs` stages run on **Node**; the only non-Node dependency is **Python** for `faster-whisper`. ffmpeg/ffprobe are external native binaries. No OS-detection or cross-platform abstraction is built — code assumes a POSIX shell, `/`-separated paths, and a Linux dynamic loader.
+Linux-only. Node runs the orchestrator scripts; Python (venv) hosts faster-whisper and OpenCV. **No browser, no GPU.**
 
-### Dependencies & acquisition
-
-| Dependency | Role | Acquisition (Linux) |
+| Dependency | Role | Acquisition |
 |---|---|---|
-| **Node ≥ 20** (`.nvmrc`) | orchestrator + Remotion | distro package or nvm |
-| **ffmpeg + ffprobe** | probe, silence, mux, loudnorm | `ffmpeg-static` / `ffprobe-static` npm packages (pinned, no system pkg-mgr) |
-| **Python ≥ 3.9** | host for faster-whisper | system Python (`python3`) |
-| **faster-whisper** | transcription | `pip install faster-whisper` into a managed `.venv` |
-| **Remotion + Chromium** | render | `npm install` (Remotion fetches its own Chromium) + headless system libs |
+| **Node ≥ 20** (`.nvmrc`) | all `.mjs` stages | distro/nvm (only manual prereq) |
+| **ffmpeg + ffprobe** | probe, silence, render, loudnorm, libass burn | **`ffmpeg-static`/`ffprobe-static` npm packages** (pinned, no system pkg-mgr); PATH fallback validated by doctor (must have `silencedetect`, `loudnorm`, `subtitles`/libass) |
+| **Python ≥ 3.9** | faster-whisper + OpenCV host | system `python3` (manual prereq if absent) |
+| **faster-whisper** | Stage 1 | `pip install` into managed `.venv` |
+| **opencv-python** + YuNet ONNX | Stage 3 | `pip install` into the same `.venv`; model downloaded by bootstrap |
+| **Caption font** | Stage 5/6 | bundled in `assets/fonts/` (OFL) — zero system-font dependency |
 
-**Pinned-binary strategy (decisive pick):** install ffmpeg/ffprobe via the **`ffmpeg-static` / `ffprobe-static` npm packages** so they arrive with `npm install` at a known version, with no `apt/dnf/pacman` step. Fall back to a system `ffmpeg` on PATH only if the static binary is missing for the arch. This removes the biggest install failure point.
-
-### Path & process handling
-- **All paths via `path` / `node:url`** and kept repo-relative under `runs/`; no manual separator handling needed (Linux only).
-- **No shell string interpolation.** Every external process is spawned with `execa`/`spawn` using **argument arrays**, not a shell command string — injection-safe for filenames with spaces/unicode; quoting only at the ffmpeg-filtergraph layer where ffmpeg itself parses.
-- **Temp files** via `os.tmpdir()`; durable artifacts always under repo `runs/`.
-
-### Self-setup / bootstrap flow (first run)
-
-`scripts/bootstrap.mjs`, triggered automatically by `/editor` if `.shortstop-ready` is absent:
+### Bootstrap flow (first run, auto-triggered when `.shortstop-ready` is absent)
 
 ```
-1. Check Node ≥ 20           → else: print the install command, abort.
-2. npm install               → orchestrator deps, Remotion, ffmpeg-static, ffprobe-static.
-3. Locate ffmpeg/ffprobe     → prefer static pkg, else PATH; validate `-version`.
-4. Check Python ≥ 3.9        → else: print the install command, abort with link.
-5. Create managed venv (.venv) + `pip install faster-whisper`.
-6. Pre-download Whisper model (config size) so first edit isn't blocked on a model fetch.
-7. Remotion bundle warm-up   → ensure its Chromium + headless libs are present.
-8. Run `doctor.mjs` self-check → all green?
-9. Write `.shortstop-ready` (records resolved binary paths + versions).
+1. Node ≥ 20 check            → else print install command, abort.
+2. npm install                → ffmpeg-static, ffprobe-static, execa, ajv.
+3. Validate ffmpeg/ffprobe    → -version + filter availability probe.
+4. Python ≥ 3.9 check         → else print install command, abort.
+5. python -m venv .venv && pip install faster-whisper opencv-python
+6. Download YuNet ONNX → models/ ; pre-download Whisper model (config size).
+7. Run doctor.mjs             → all green?
+8. Write .shortstop-ready     → records resolved binary paths + versions.
 ```
 
-`scripts/doctor.mjs` is also runnable on demand and prints an **actionable** report (what's missing + the exact command to fix it) rather than a stack trace.
+`doctor.mjs` is runnable on demand and prints an actionable report (what's missing + the exact fix command), never a stack trace.
 
-### Linux failure points (called out)
+### Linux failure points
 
 | Likely failure | Mitigation |
 |---|---|
-| Remotion's headless Chromium missing shared libs (`libnss3`, `libatk`, etc.) | doctor checks for them and prints the distro install line. |
-| System `ffmpeg` (if used as fallback) lacking `silencedetect`/`loudnorm` | static package avoids it; doctor validates filter availability with a probe call. |
-| Python wheel / CTranslate2 arch mismatch on non-x86_64 (e.g. arm64 server) | pin a faster-whisper version with wheels for the arch; venv isolates it. |
-| First-run model/Chromium downloads are slow → looks "hung" | bootstrap streams progress; `/editor` tells the user setup is a one-time cost. |
+| CTranslate2 / opencv wheel mismatch on non-x86_64 | pin versions with arm64 wheels; venv isolates; doctor reports the exact pip error + alternative |
+| PATH-fallback ffmpeg missing libass/loudnorm | static binaries preferred; doctor probes filters explicitly |
+| First-run model downloads look "hung" | bootstrap streams progress; playbook tells the user it's one-time |
+| Host project CWD not writable / dirs missing | skill creates `input|output|reference|runs` on demand; clear error otherwise |
+
+(Note what is *gone* vs v1: the entire headless-Chromium dependency class — previously the #1 install risk — was eliminated by the ffmpeg renderer decision.)
+
+### Path & process hygiene
+- All paths via `node:path`/`node:url`; workspace dirs resolved against the **host project CWD**, skill internals against the skill folder.
+- **No shell string interpolation.** Every external process is array-spawned (`execa`); filenames with spaces/unicode are safe. Filtergraph escaping is centralized in `lib/ffmpeg.mjs`.
+- Temp files in `os.tmpdir()`; durable artifacts only under `runs/`.
 
 ---
 
 ## 7. Implementation Phases
 
-Phases are ordered so each is independently testable and builds the artifact the next consumes. Every phase has a **binary** acceptance check.
+Each phase has a **binary** acceptance check and builds what the next consumes.
 
-### Phase 0 — Repo skeleton & contracts
-- **Objective:** lay the structure and the artifact schemas before any logic.
-- **Tasks:** create the §4 tree (empty stubs + `.gitkeep`s); write the five `schemas/*.json`; implement `lib/artifacts.mjs` (schema-validated read/write); write `config/shortstop.config.json` + its schema; `package.json` + `.nvmrc`.
-- **Delivers:** a validatable contract layer.
-- **Done when:** `node -e` round-trips a hand-written sample of each artifact through `artifacts.mjs` and **schema validation passes for valid samples and fails for malformed ones** (a tiny test asserts both).
+### Phase 0 — Skeleton & contracts
+- Repo tree per §4; six `schemas/*.schema.json`; `lib/artifacts.mjs` (validated read/write); `config/default.config.json` + schema; `package.json` + `.nvmrc`; `tests/fixtures.mjs` generator.
+- **Done when:** valid hand-written samples of all six artifacts round-trip through `artifacts.mjs`, malformed samples are rejected (test asserts both), and `fixtures.mjs` generates the §4.2 fixture set.
 
 ### Phase 1 — Bootstrap & doctor
-- **Objective:** dependable one-command Linux setup before any media work.
-- **Tasks:** implement `platform.mjs`, `bootstrap.mjs`, `doctor.mjs`; wire ffmpeg-static/ffprobe-static; venv + faster-whisper install; model pre-fetch; `.shortstop-ready`.
-- **Delivers:** one-command environment setup.
-- **Done when:** on a clean Linux machine, running bootstrap produces `.shortstop-ready` and **`node scripts/doctor.mjs` exits 0 with every dependency green**.
+- `bootstrap.mjs`, `doctor.mjs`, `lib/spawn.mjs`, `lib/ffmpeg.mjs`, `lib/venv.mjs`.
+- **Done when:** on a clean Linux machine, bootstrap writes `.shortstop-ready` and `node scripts/doctor.mjs` exits 0 all-green.
 
-### Phase 2 — Probe (Stage 0)
-- **Objective:** exact source metadata.
-- **Tasks:** `probe.mjs` + `lib/ffmpeg.mjs`; `lib/timecode.mjs` rational fps handling.
-- **Delivers:** `probe.json`.
-- **Done when:** on a known 29.97 fps test clip, `probe.json.fps_num/fps_den == 30000/1001` and width/height/duration **match `ffprobe` ground truth exactly** (asserted in test).
+### Phase 2 — Probe & normalize (Stage 0)
+- `probe.mjs`, `lib/timecode.mjs`.
+- **Done when:** NTSC fixture → `fps_num/fps_den == 30000/1001` exactly; VFR fixture → `vfr: true` + normalized CFR intermediate produced; rotated fixture → corrected `display_*` dims; 21-min fixture → rejected with the one-line message. (All asserted.)
 
 ### Phase 3 — Transcription (Stage 1)
-- **Objective:** word-level transcript.
-- **Tasks:** `transcribe.py` (faster-whisper, `word_timestamps=True`, VAD); `whisper.mjs` Node↔Python bridge; WAV extraction.
-- **Delivers:** `transcript.json`.
-- **Done when:** on a 30 s fixture clip, `transcript.json` validates against schema and **every segment has non-empty word-level timestamps within `[0, duration]`** (asserted).
+- `transcribe.py` + venv bridge + shared-mixdown WAV extraction.
+- **Done when:** speech fixture → schema-valid transcript, every segment has word timestamps within `[0, duration]`, planted words present.
 
 ### Phase 4 — Silence map (Stage 2)
-- **Objective:** dead-air regions.
-- **Tasks:** `silence.mjs`; parse `silencedetect` stderr; config thresholds.
-- **Delivers:** `silence.json`.
-- **Done when:** on a fixture with two known inserted silences, **both regions are detected within ±100 ms and regions are sorted/non-overlapping** (asserted).
+- `silence.mjs` with astats calibration + silencedetect parse.
+- **Done when:** fixture with two planted silences → both detected ±100 ms, sorted, non-overlapping; a +20 dB noisier variant of the same fixture → same two regions found (calibration works); music fixture → empty map + `calibrated: false` handled without crash.
 
-### Phase 5 — Cut decisions (Stage 3, Claude)
-- **Objective:** transcript + silence → validated keep-list EDL.
-- **Tasks:** write `prompts/cut_decisions.md`; orchestrator Claude call; `build_edl.mjs` (validate, boundary-snap, coverage check).
-- **Delivers:** `edl.json`.
-- **Done when:** on a fixture with scripted filler + one false start, the produced `edl.json` **validates against schema, has zero overlapping/mid-word segments, and `removed` includes the planted filler** (asserted; boundary-snap and overlap checks are deterministic so the binary check does not depend on LLM nondeterminism).
+### Phase 5 — EDL validation (Stage 4 guardrail)
+- `prompts/cut_decisions.md`; `build_edl.mjs` (pad → snap-to-silence-midpoint → merge → no-straddle check → coverage).
+- **Done when (deterministic, no LLM in the loop):** a **canned** draft-EDL fixture is padded/snapped to the known silence midpoints exactly; overlapping/mid-word/out-of-range drafts are rejected with machine-readable reasons. *(Separately, a non-gating eval script runs the real prompt against the filler fixture and reports whether the planted filler was removed — quality signal, not a test.)*
 
-### Phase 6 — Render (Stage 4, Remotion)
-- **Objective:** EDL → candidate.mp4 at source fps/resolution.
-- **Tasks:** Remotion project; `Root.tsx`/`ShortstopVideo.tsx` props-driven dimensions+fps; `render.mjs`; `loudnorm` post-pass; junction cross-fades; post-render fps assertion.
-- **Delivers:** `candidate.mp4`.
-- **Done when:** rendering a 2-segment EDL yields a playable mp4 whose **`ffprobe` fps == source fps, resolution == source, and duration == sum(keep durations) ±1 frame** (asserted).
+### Phase 6 — Subject track (Stage 3)
+- `track.py` (YuNet, stickiness, dead-zone smoothing, fallback).
+- **Done when:** the zoompan-face fixture → `coverage ≥ 0.9`, crop path follows the known drift within tolerance, and **max crop velocity is bounded** (smoothing works — asserted numerically); the testsrc2 fixture → `mode: "fallback"`.
 
-### Phase 7 — QA loop (Stage 5)
-- **Objective:** compare to reference, auto-fix, bound the loop.
-- **Tasks:** **reference-required guard** (abort before render with a clear message if `reference/` is empty); `qa.mjs` signal extraction; `prompts/qa_gap_fix.md`; orchestrator fix loop with retry ceiling + convergence/fallback (§8).
-- **Delivers:** `qa_report.json`, fix loop, `QA_REPORT.md` on failure.
-- **Done when:** (a) running with an empty `reference/` **aborts before render with a clear "add a reference clip" message**, and (b) a deliberately bad candidate (e.g. 2× target duration) triggers ≥1 fix attempt and **the loop terminates within the ceiling with either a pass or a written `QA_REPORT.md` — never an infinite loop** (asserted with a forced-non-converging fixture).
+### Phase 7 — Captions (Stage 5)
+- `build_captions.mjs` + bundled font.
+- **Done when:** for a 2-keep EDL fixture, every Dialogue time lies within the output duration, line grouping respects the §5.6 rules, and ffmpeg parses the `.ass` (dry-run burn on 1 s of black succeeds).
 
-### Phase 8 — Skill packaging & `/editor`
-- **Objective:** wire the whole pipeline behind the skill UX.
-- **Tasks:** `SKILL.md`; `.claude/commands/editor.md`; `orchestrate.mjs` end-to-end (input-watch → stages 0–7 → deliver); progress surfacing; natural-language entry.
-- **Delivers:** the usable skill.
-- **Done when:** dropping a fixture clip in `input/` and running `/editor` (or asking in NL) **produces an `output/<name>.mp4` that passes QA, with all run artifacts present in `runs/<id>/`** — full end-to-end smoke test green.
+### Phase 8 — Render (Stage 6)
+- `render.mjs`: pass A, pass B (sendcmd crop / blur-pad, captions burn, two-pass loudnorm + aresample), post-render assertions, incremental pass-B re-render.
+- **Done when:** 2-segment EDL → playable mp4 at 1080×1920, fps == source rational, `duration == Σkeep ± 1 frame`, integrated loudness −14 ± 1 LUFS, true peak ≤ −1 dBTP, audio at source sample rate (all asserted via ffprobe/loudnorm-measure).
 
-### Phase 9 — Hardening & distribution
-- **Objective:** verified clean-clone install on Linux; shippable folder.
-- **Tasks:** run E2E on a fresh Linux environment; fix path/shell/dep issues; finalize README quickstart; confirm clean-clone → bootstrap → edit works; package the downloadable folder.
-- **Delivers:** the distributable skill.
-- **Done when:** a **fresh clone on a clean Linux machine** completes bootstrap and the E2E smoke test with no manual intervention beyond installing Node/Python where the system lacks them.
+### Phase 9 — QA loop (Stage 7)
+- `qa.mjs` signal extraction + reference-signal caching; `prompts/qa_gap_fix.md`; the playbook loop logic (§8) encoded in SKILL.md; deterministic remediation map.
+- **Done when:** (a) empty `reference/` aborts at start with the add-a-reference message; (b) a deliberately broken candidate (forced black frames) produces a `hard` gap and the refuse-to-deliver path writes `QA_REPORT.md` with no mp4 in `output/`; (c) a forced-non-converging soft-gap fixture terminates within 5 fix attempts via the no-progress guard and delivers best-candidate + report. Never an unbounded loop (asserted).
+
+### Phase 10 — Skill packaging
+- `SKILL.md` playbook (full §4 annotation), workspace-dir creation, `--review-edl`, progress surfacing, run pruning, output naming.
+- **Done when:** with the skill installed at `.claude/skills/shortstop/` in a scratch project, dropping a fixture and invoking the skill end-to-end produces `output/<stem>-<runid>.mp4` that passes QA, with all artifacts in `runs/<id>/`; a second run does not clobber the first.
+
+### Phase 11 — Hardening & distribution
+- Fresh-clone E2E on a clean Linux box/container; README quickstart; package the `skill/` folder as the release artifact.
+- **Done when:** clean machine → install Node/Python → copy skill folder → bootstrap + E2E smoke green with no other manual steps.
 
 ---
 
 ## 8. QA Loop Design
 
-**Purpose.** Catch the failure modes automated cutting introduces — over-aggressive trims, pacing that doesn't match the creator's style, audio jumps, clipped words — by measuring the candidate against a **reference clip** that represents the target look/feel, then fixing within a bounded loop.
+**Purpose.** Catch what automated cutting breaks — clipped words, choppy pacing, audio jumps, render glitches, lost framing — and fix it within a bounded loop. Measurement is deterministic (`qa.mjs`); fix decisions are Claude's.
 
-### Signals (candidate vs reference)
+### Signals & gaps
 
-| Signal | How measured | Why it matters |
-|---|---|---|
-| **Duration / coverage** | candidate duration; sum of kept transcript words vs source | catches over-cutting (too short / dropped content) and under-cutting (nothing removed). |
-| **Pacing** | cuts-per-minute & average shot length (from EDL junctions) vs reference's | matches the creator's rhythm — a snappy reference implies tighter cuts. |
-| **Audio loudness & peak** | `ffmpeg loudnorm`/`astats` integrated LUFS + true peak vs reference | ensures consistent, social-ready levels; flags clipping. |
-| **Cut density distribution** | histogram of shot lengths vs reference | distinguishes "many tiny jump cuts" from "few long holds." |
-| **Visual diff (coarse)** | perceptual hash / SSIM on sampled frames at cut boundaries; black-frame & freeze detection | catches render glitches, black frames, frozen junctions, letterboxing. |
-| **Content survival** | every `edl.keep` word present in candidate transcript region (re-transcribe candidate or map by time) | guarantees no meaningful speech was lost. |
+| Signal | Measured how | Severity | Default tolerance |
+|---|---|---|---|
+| **Coverage / duration integrity** | candidate duration vs `Σ keep` | **hard** | ± 1 frame |
+| **Loudness** | two-pass loudnorm measure: integrated LUFS | **hard** | −14 ± 2 LU |
+| **Clipping** | true peak | **hard** | ≤ −1 dBTP |
+| **Visual defects** | `blackdetect` + `freezedetect` over the candidate | **hard** | none allowed |
+| **Shorts length** | absolute duration | soft | ≤ 180 s (warn above) |
+| **Framing** | YuNet on candidate frames sampled at 1 fps: face center within `framing_tolerance` (15%) of crop center for ≥ 90% of face-mode samples | soft | config |
+| **Pacing / cut density** | cuts-per-minute + shot-length histogram from EDL vs **reference-derived** band | soft (advisory — never fix-driving on its own) | ± 50% |
+| **Captions sanity** | `.ass` events count > 0 when enabled; last event ≤ duration | **hard** | — |
+| **Content survival** | **by construction**: `build_edl.mjs` no-straddle check + the hard duration gate above. Optional `qa.verify_transcript: true` re-transcribes the candidate and fuzzy-matches kept words — **advisory only** (Whisper nondeterminism makes it unreliable as a gate), default off. | soft | — |
 
-**Reference handling.** A reference clip in `reference/` is **required**; the orchestrator aborts before render if none is present (the user is told to add one). The reference's signals are computed once and cached. **Assumption:** the reference is a *style/pacing exemplar*, not a frame-by-frame template — QA matches **distributions and tolerances** derived from the reference, not exact timings. Config still supplies hard absolute bounds (loudness target, true-peak ceiling, no black/frozen frames, content-survival = 100%) that apply alongside the reference-derived tolerances.
+Changes vs v1, deliberately: **duration is never compared to the reference** (edit length is a property of the raw content — comparing to an unrelated clip forced content-butchering); SSIM-at-junctions is dropped (false-positives on natural motion — `freezedetect`/`blackdetect` cover the real defects); content survival moved from a flaky re-transcription gate to a structural guarantee.
 
-### What counts as a "gap"
-
-A gap is any signal outside its tolerance band (tolerances in `config`):
-
-| Gap | Example condition | Default tolerance |
-|---|---|---|
-| too long / too short | `dur` outside reference ±25% (or target ±10% if set) | configurable |
-| pacing mismatch | cuts/min off reference by > 50% | configurable |
-| loudness off | integrated LUFS off target by > 2 LU | hard |
-| clipping | true peak > -1 dBTP | hard |
-| visual defect | any black/frozen frame, or SSIM < 0.4 across a non-cut junction | hard |
-| content loss | any kept word missing from candidate | hard (never ship) |
-
-Gaps carry a **severity**: `hard` gaps block delivery; `soft` gaps (pacing/duration within reason) are attempted but won't fail an otherwise-good clip at the ceiling.
-
-### Fix-and-recheck cycle
+### Fix-and-recheck cycle (executed by Claude per the playbook)
 
 ```
-attempt = 0
-while attempt < CEILING:
-    candidate = render(edl)
-    report = qa.measure(candidate, reference)        # deterministic
-    if report.verdict == "pass": deliver(candidate); return
-    if no actionable hard gaps and only soft gaps remain: deliver(candidate); return
-    edl = claude.fix(report.gaps, edl, rules)         # minimal change, largest gap first
-    if edl == previous_edl: break                     # no-progress guard
-    attempt += 1
-deliver_with_report(best_candidate, QA_REPORT.md)     # fallback
+render candidate_a0 ; report_a0 = qa.measure()
+best = (a0)                                  # best = highest score, fewest hard gaps
+for attempt in 1 .. max_fix_attempts (5):
+    if best has verdict "pass": break
+    gaps = best.gaps ordered hard-first, largest deviation first
+    fix = deterministic_remediation(gaps[0]) # loudness off → recompute loudnorm;
+                                             # captions overflow → re-group lines;
+                                             # framing lag → retune smoothing params
+          else Claude applies prompts/qa_gap_fix.md
+               → minimal EDL/param change targeting gaps[0] only
+    re-render (pass B only if EDL unchanged) ; measure
+    if score did not improve vs best: no_progress += 1
+        if no_progress == 2: break           # score-based guard (EDL equality is
+                                             # not the guard — LLM output varies)
+    else: best = this attempt ; no_progress = 0
+
+deliver:
+    no gaps                → output/<stem>-<runid>.mp4
+    soft gaps only         → deliver best + output/<stem>-<runid>.QA_REPORT.md
+    any hard gap remaining → REFUSE: QA_REPORT.md only (observed vs target,
+                             suggested manual fix, path to best candidate in runs/)
 ```
 
-- **Minimal-change principle:** each fix targets the single largest actionable gap (e.g. "duration 2× → restore the over-trimmed segments tagged low-confidence"), not a wholesale re-edit — keeps the loop convergent.
-- **No-progress guard:** if a fix produces an EDL identical to the prior attempt (or scores don't improve), break immediately rather than burning the ceiling.
-
-### Retry ceiling & non-convergence fallback
-
-- **Ceiling: 3 fix attempts** (`config.qa.max_attempts`, default 3). Each attempt is one render + one measure; rendering is the expensive step, so 3 bounds wall-clock to "a couple minutes" for short clips. (Alternative ceilings logged in Open Questions.)
-- **Best-candidate tracking:** the loop keeps the highest-scoring candidate seen.
-- **Fallback when QA can't converge:** deliver the **best** candidate to `output/` **and** write `output/<name>.QA_REPORT.md` listing the unresolved gaps, observed-vs-target numbers, and a suggested manual fix. Hard `content-loss` gaps are the exception — if content was lost and can't be restored, the loop reverts toward a **less aggressive EDL** rather than shipping lossy; if even the minimal-cut EDL fails a hard visual/content check, Shortstop **refuses to deliver** and reports, rather than shipping a broken clip.
+Loop invariants (fixing v1's mechanical bugs):
+- **Measure-first ordering** — every Claude fix is rendered and measured; no fix is ever produced and then discarded at the ceiling.
+- **Ceiling semantics** — `max_fix_attempts = 5` counts *fix* attempts; total renders ≤ 6 (initial + 5). With the ffmpeg renderer and pass-B-only re-renders, worst case stays in the minutes envelope.
+- **Soft gaps get fix attempts** (while budget remains) but never block delivery at the ceiling.
+- **Hard gaps never ship.** If the minimal-cut direction can't clear a hard gap, Shortstop refuses and reports rather than delivering a broken clip.
+- **Deterministic remediations before LLM judgment** — gaps with a known mechanical fix (loudness, caption layout) never burn a judgment step.
 
 ---
 
 ## 9. Risks & Mitigations
 
-| Risk | Likelihood | Impact | Mitigation |
+| Risk | L | I | Mitigation |
 |---|---|---|---|
-| **Whisper accuracy** (mis-transcribed words → wrong cut points) | Medium | High | Word-level `prob` surfaced to Stage 3; Claude treats low-confidence regions cautiously and biases toward keeping. VAD filter reduces hallucinated text. Model size configurable up to `medium` for hard audio. |
-| **Whisper latency** (slow on CPU / long clips) | Medium | Medium | `faster-whisper` (4–5× faster than reference). Default `small` model. Pre-download model in bootstrap. Chunk long clips. Cloud-Whisper fallback is an Open Question for weak machines. |
-| **Over-aggressive / wrong cuts** (clips feel choppy or lose meaning) | Medium | High | "When unsure, keep it" prompt bias; boundary-snap to word edges (never mid-word); QA content-survival is a *hard* gap; fix loop restores over-trimmed segments; reference-pacing comparison catches choppiness. |
-| **fps / resolution mismatch** (output resampled, stutters) | Low | High | Exact **rational** fps from `ffprobe`; props-driven Remotion composition; **post-render fps assertion fails the stage** if it drifts. Resolution carried from probe, never hardcoded. |
-| **Remotion render failure** (codec, Chromium, OOM) | Medium | High | Optional lossless pre-transcode to a Remotion-friendly intermediate; Chromium fetched & validated in bootstrap; render runs in a subprocess with a timeout; clear error → doctor. |
-| **Linux dependency/install breakage** (missing Chromium libs, Python/arch mismatch) | Medium | High | ffmpeg-static/ffprobe-static (no system pkg mgr); array-spawn (no shell quoting); managed Python venv; `doctor.mjs` with exact fix commands; Phase 9 verifies a fresh clean-clone install. |
-| **QA loop non-convergence** (infinite/oscillating fixes) | Medium | Medium | Hard retry ceiling (3); no-progress guard; best-candidate tracking; deterministic fallback that always delivers-or-reports. |
-| **Long clips / memory** (transcript > context, render OOM) | Medium | Medium | Silence-bounded chunking for transcription + Stage 3 windowing; streaming render where possible; **Assumption:** v1 optimized for ≤ ~20 min raw → short-form; longer is best-effort and logged. |
-| **Claude nondeterminism in EDL** (different cuts run-to-run) | Medium | Medium | Deterministic guardrails (`build_edl.mjs`) make *validity* deterministic even if *choices* vary; low temperature for the cut prompt; tests assert structural invariants, not exact cuts. |
-| **Silence threshold mismatch** (quiet rooms vs noisy) | Medium | Medium | Config-tunable `noise`/`d`; **Assumption:** -30 dB / 0.6 s default; doctor/first-run could calibrate from the clip's noise floor (Open Question). |
+| **Whisper word-timestamp slop** → clipped syllables | High | High | `pad_s` boundary padding + snap to silence **midpoints** in `build_edl.mjs` (the single snapping authority); VAD filter; QA framing/audio gates. |
+| **Whisper mis-transcription** → wrong cut targets | Med | High | word `prob` surfaced to Stage 4; low-confidence words kept by rule; model size configurable. |
+| **Over-aggressive cuts** | Med | High | "when unsure, keep it" bias; no cutting for length without a target; coverage stats in EDL; pacing advisory. |
+| **VFR / rotated input breaks frame math** | High | High | Stage 0 detects and normalizes to CFR / bakes rotation **before** any timestamp is recorded. |
+| **Tracking failures** (wrong face, jitter, no face) | Med | Med | largest-face + stickiness; dead-zone smoothing with bounded velocity (tested numerically); coverage-based blur-pad fallback; QA framing check on the *rendered* candidate. |
+| **Crop upscale softness on 1080p sources** | High | Low | lanczos; README recommends ≥1440p capture; accepted v1 trade-off. |
+| **Caption rendering issues** (font, escaping) | Low | Med | bundled font via `fontsdir` (no system fonts); centralized filtergraph escaping; Phase 7 dry-run parse test. |
+| **Silence threshold mismatch** | Low | Med | auto-calibration from measured noise floor (Decision Record #8); recorded calibration values; explicit degraded mode when no silence exists. |
+| **QA non-convergence / oscillation** | Med | Med | 5-attempt ceiling; score-based no-progress guard; best-candidate tracking; deliver-or-report fallback. |
+| **Claude EDL nondeterminism** | Med | Med | validity is deterministic (`build_edl.mjs`); tests assert structural invariants, never exact cuts; LLM-dependent checks are non-gating evals. |
+| **Linux dep breakage** (wheels, PATH ffmpeg) | Med | Med | static ffmpeg binaries; pinned versioned venv; doctor with exact fix commands; Phase 11 clean-machine verification. |
+| **Disk growth** (multi-attempt 1080p candidates) | Med | Low | per-attempt files named `candidate_a<N>.mp4`; `runs.keep_last` pruning after delivery. |
 
 ---
 
-## 10. Open Questions
+## 10. Decision Record
 
-Each blocks or shapes a decision; phrased as concrete either/ors. **None currently block any phase — Phase 1 is unblocked.**
+All v1 open questions are resolved. The "why" is recorded so future contributors don't relitigate.
 
-> **Resolved:** *Cross-platform support* — Linux only for v1 (macOS/Windows out of scope). *Reference clip* — **required**; the pipeline aborts before render if `reference/` is empty. *ffmpeg sourcing* — **`ffmpeg-static` / `ffprobe-static` npm packages** (system `ffmpeg` on PATH used only as an automatic fallback if the static binary is missing for the arch).
-
-1. **Captions in v1?** Non-Goals excludes them, but the word-level transcript makes burned-in captions nearly free. Add a v1 toggle (off by default) or defer entirely? Shapes **Stage 4** scope.
-2. **Whisper location:** fully local `faster-whisper` (plan's pick) vs offer a cloud Whisper fallback for low-power machines (adds an API key + privacy consideration). Affects **Phase 3** + Non-Goals.
-3. **Long-clip handling:** confirm the **~20 min** raw-input ceiling for v1, or must it handle 60-min+ recordings (changes chunking design materially)? Shapes **Stage 1/3**.
-4. **Remotion intermediate transcode:** always pre-transcode to a friendly intermediate (robust, slower) vs feed source directly to `<OffthreadVideo>` and transcode only on failure (faster, plan's pick)? Affects **Phase 6**.
-5. **QA retry ceiling:** 3 attempts (plan's pick) vs a wall-clock budget (e.g. "stop after 3 min") vs user-configurable per run? Affects **Phase 7**.
-6. **Aspect ratio:** deliver at source aspect untouched (plan's pick), or auto-reframe to vertical 9:16 for Shorts/Reels/TikTok (a much bigger feature — reframing/subject-tracking)? Currently a Non-Goal; confirm.
-7. **Output naming & collisions:** `output/<sourcename>.mp4` overwrite vs timestamped/`-v2` suffix to avoid clobbering a prior edit? Minor; affects **Phase 8**.
-8. **Silence-threshold calibration:** fixed config default (-30 dB) vs auto-calibrate per clip from its measured noise floor? Affects **Stage 2** robustness.
-9. **`/editor` interactivity:** fully hands-off (plan's default), or pause to let the user approve the EDL before rendering on first use? Affects **Phase 8** UX.
+| # | Decision | Choice | Rationale |
+|---|---|---|---|
+| 1 | Render engine | **ffmpeg only** | v1 needs cuts/concat/captions/loudnorm — all one ffmpeg pass-pair. Removes the Chromium install-risk class, the Remotion company-license issue, CPU-render slowness, and the float-fps mismatch with the exact-rational-fps requirement. EDL contract stays renderer-agnostic for a v2 Remotion swap (animated caption layouts). |
+| 2 | Captions | **v1, on by default** | Word timestamps already exist; captions are table stakes for professional Shorts. ASS karaoke via libass — no extra renderer. |
+| 3 | Aspect | **9:16 with subject tracking in v1** | A 16:9 file is not a Short. User explicitly chose tracked reframing over static crop — adds Stage 3 (YuNet) and the sendcmd crop path. Static modes remain as config fallbacks. |
+| 4 | Reference clip | **Required** | User keeps the style-exemplar contract: abort at invocation start if `reference/` is empty. Fixed vs v1: reference drives **soft style tolerances only** — never duration. |
+| 5 | QA ceiling | **5 fix attempts** | User chose a higher ceiling for quality. Affordable because the renderer is ffmpeg and audio/caption-only fixes re-run pass B alone. |
+| 6 | Input length | **~20 min hard cap** | Rejects longer input with a clear message. Guarantees single-window Stage 4; deletes all chunking machinery from v1. |
+| 7 | Whisper | **Local only** | No API key, no privacy surface, no network dependency. Weak machines drop to the `base` model. |
+| 8 | Silence threshold | **Auto-calibrate** | Per-clip noise-floor measurement; fixed default only as fallback. Robust across rooms/mics without support burden. |
+| 9 | Interactivity | **Fully hands-off** + `--review-edl` opt-in | Preserves the one-command promise; reviewers get the cut table on request. |
+| 10 | Packaging | **Skill folder** at `.claude/skills/shortstop/` | Root-level SKILL.md / bundled commands are not discovered by Claude Code. Workspace dirs resolve against the host project CWD. No separate slash-command file. |
+| 11 | Output naming | **Never clobber** — `output/<stem>-<runid>.mp4` | Re-edits never destroy prior versions. |
+| 12 | Pre-transcode | **Only when probe detects trouble** (VFR / rotation / exotic codec) | Fast path for clean sources; the normalize machinery is mandatory anyway because VFR breaks the frame math. |
+| — | Orchestration | **Claude orchestrates; scripts are tools** | A Node orchestrator cannot "call Claude" inside a skill without API keys/cost. Inverting control is what makes the skill work in-session. |
+| — | Audio at junctions | **10 ms micro-fades**, not 40 ms cross-fades | Cross-fades require borrowing audio from removed regions (which may contain the cut filler) and break duration math. Cuts land in silence; micro-fades suffice. |
+| — | Loudness | **Two-pass `loudnorm`** + `aresample` to source rate | Single-pass is dynamic (pumps); loudnorm upsamples to 192 kHz internally and must be resampled back. |
+| — | Content survival | **Structural guarantee**, not re-transcription | `build_edl.mjs` no-straddle check + hard duration gate. Re-transcription is nondeterministic → advisory-only, off by default. |
 
 ---
 
@@ -497,56 +530,64 @@ Each blocks or shapes a decision; phrased as concrete either/ors. **None current
 
 ```
 Phase 0 — Skeleton & contracts
-- [ ] §4 folder tree created with stubs + .gitkeep
-- [ ] schemas/{probe,transcript,silence,edl,qa_report}.schema.json written
-- [ ] lib/artifacts.mjs validates read/write against schemas
-- [ ] config/shortstop.config.json + schema
-- [ ] package.json + .nvmrc
-- [ ] DONE: valid samples pass, malformed samples fail (test)
+- [ ] §4 tree; schemas/{probe,transcript,silence,track,edl,qa_report}.schema.json
+- [ ] lib/artifacts.mjs validated read/write; default.config.json + schema
+- [ ] tests/fixtures.mjs generates §4.2 fixture set
+- [ ] DONE: valid samples pass, malformed fail; fixtures build
 
 Phase 1 — Bootstrap & doctor
-- [ ] lib/platform.mjs (path resolution, array-spawn)
-- [ ] bootstrap.mjs (node check, npm install, ffmpeg-static, venv + faster-whisper, model prefetch, Chromium warm-up)
-- [ ] doctor.mjs (actionable Linux report)
-- [ ] DONE: bootstrap writes .shortstop-ready; doctor exits 0 all-green on clean Linux
+- [ ] bootstrap.mjs (npm deps, venv: faster-whisper+opencv, YuNet+Whisper model fetch)
+- [ ] doctor.mjs actionable report; lib/{spawn,ffmpeg,venv}.mjs
+- [ ] DONE: clean Linux → .shortstop-ready; doctor exits 0
 
-Phase 2 — Probe
-- [ ] lib/ffmpeg.mjs + lib/timecode.mjs (rational fps)
-- [ ] probe.mjs → probe.json
-- [ ] DONE: 29.97 clip → fps 30000/1001, dims/duration exact
+Phase 2 — Probe & normalize
+- [ ] probe.mjs (rational fps, rotation-corrected dims, VFR detect, audio-source resolve,
+      20-min cap) + conditional CFR normalize; lib/timecode.mjs
+- [ ] DONE: NTSC exact; VFR normalized; rotation corrected; 21-min rejected
 
 Phase 3 — Transcription
-- [ ] transcribe.py (faster-whisper, word_timestamps, VAD)
-- [ ] whisper.mjs bridge + WAV extraction
-- [ ] DONE: fixture → transcript.json with word-level timestamps in range
+- [ ] transcribe.py (word_timestamps, VAD) + shared-mixdown WAV extraction
+- [ ] DONE: fixture → schema-valid word-level transcript in range
 
 Phase 4 — Silence map
-- [ ] silence.mjs (silencedetect parse, config thresholds)
-- [ ] DONE: two planted silences detected ±100ms, sorted/non-overlapping
+- [ ] silence.mjs (astats noise-floor calibration → silencedetect)
+- [ ] DONE: planted silences ±100ms; noisy variant also passes; music → graceful empty map
 
-Phase 5 — Cut decisions (Claude)
-- [ ] prompts/cut_decisions.md
-- [ ] orchestrator Claude call + build_edl.mjs (validate, boundary-snap, coverage)
-- [ ] DONE: edl.json validates, no overlap/mid-word, planted filler removed
+Phase 5 — EDL validation
+- [ ] prompts/cut_decisions.md; build_edl.mjs (pad → silence-midpoint snap → merge →
+      no-straddle → coverage; machine-readable rejections)
+- [ ] DONE: canned drafts snapped exactly / rejected correctly (no LLM in tests);
+      separate non-gating prompt eval
 
-Phase 6 — Render (Remotion)
-- [ ] remotion/ project, props-driven fps+dims
-- [ ] render.mjs + loudnorm post-pass + junction cross-fades + fps assertion
-- [ ] DONE: 2-segment EDL → playable mp4, fps==source, res==source, dur==Σkeep ±1 frame
+Phase 6 — Subject track
+- [ ] track.py (YuNet @5fps, largest+sticky, interpolate/hold, dead-zone smoothing,
+      even-pixel clamp, fallback flag)
+- [ ] DONE: face fixture coverage ≥0.9 + bounded crop velocity; no-face → fallback
 
-Phase 7 — QA loop
-- [ ] reference-required guard (abort before render if reference/ empty)
-- [ ] qa.mjs signal extraction (duration, pacing, audio, cut density, visual diff, content survival)
-- [ ] prompts/qa_gap_fix.md + fix loop (ceiling, no-progress guard, best-candidate, fallback)
-- [ ] DONE: empty reference aborts clearly; bad candidate triggers ≥1 fix; loop always terminates (pass or QA_REPORT.md)
+Phase 7 — Captions
+- [ ] build_captions.mjs (source→output time map, line grouping, ASS karaoke, bundled font)
+- [ ] DONE: times in range; grouping rules hold; ffmpeg parses .ass
 
-Phase 8 — Skill packaging & /editor
-- [ ] SKILL.md + .claude/commands/editor.md
-- [ ] orchestrate.mjs end-to-end + progress + NL entry
-- [ ] DONE: drop clip + /editor → output/<name>.mp4 passes QA, runs/<id>/ artifacts present
+Phase 8 — Render
+- [ ] render.mjs pass A (trim/concat/micro-fades → MKV+PCM mezzanine)
+- [ ] render.mjs pass B (sendcmd crop | blur-pad, scale lanczos, subtitles burn,
+      2-pass loudnorm + aresample, faststart) + post-render assertions + pass-B-only rerender
+- [ ] DONE: 1080×1920, fps==source, dur==Σkeep ±1f, −14±1 LUFS, ≤−1 dBTP
 
-Phase 9 — Hardening & distribution
-- [ ] E2E on a clean Linux environment; path+shell+dep fixes
-- [ ] README quickstart; downloadable folder packaged
-- [ ] DONE: fresh clone on clean Linux → bootstrap + E2E smoke green, no manual steps beyond Node/Python
+Phase 9 — QA loop
+- [ ] reference-required guard at invocation start; reference signal cache
+- [ ] qa.mjs (coverage, loudness, peak, black/freeze, framing re-detect, pacing-advisory,
+      captions sanity); prompts/qa_gap_fix.md; deterministic remediation map
+- [ ] SKILL.md loop: measure-first, 5-attempt ceiling, score-based no-progress guard,
+      best-candidate, soft-deliver / hard-refuse rules
+- [ ] DONE: no-reference aborts; hard gap → refuse+report; non-converging soft → terminates ≤5
+
+Phase 10 — Skill packaging
+- [ ] SKILL.md playbook (bootstrap trigger, prereq checks, stage sequence, --review-edl,
+      progress, delivery summary, runs pruning); workspace dir creation
+- [ ] DONE: installed in scratch project → e2e green; second run never clobbers
+
+Phase 11 — Hardening & distribution
+- [ ] clean-machine E2E; README quickstart; package skill/ as release artifact
+- [ ] DONE: fresh box + Node/Python → copy folder → bootstrap + smoke green
 ```

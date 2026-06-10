@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "shortstop/config.schema.json",
+  "title": "Shortstop configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_minutes": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "whisper": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": { "enum": ["tiny", "base", "small", "medium", "large-v3"] },
+        "language": { "type": "string", "minLength": 2 }
+      }
+    },
+    "silence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_calibrate": { "type": "boolean" },
+        "offset_db": { "type": "number", "minimum": 0 },
+        "min_silence_s": { "type": "number", "exclusiveMinimum": 0 },
+        "fallback_threshold_db": { "type": "number", "maximum": 0 }
+      }
+    },
+    "cut": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fillers": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "max_pause_s": { "type": "number", "exclusiveMinimum": 0 },
+        "pad_s": { "type": "number", "minimum": 0 },
+        "aggressiveness": { "enum": ["gentle", "normal", "aggressive"] },
+        "target_duration_s": { "type": ["number", "null"], "exclusiveMinimum": 0 }
+      }
+    },
+    "aspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "enum": ["9:16", "source"] },
+        "no_face_fallback": { "enum": ["blur-pad", "center-crop"] },
+        "out_width": { "type": "integer", "minimum": 2 },
+        "out_height": { "type": "integer", "minimum": 2 }
+      }
+    },
+    "captions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "max_words_per_line": { "type": "integer", "minimum": 1 },
+        "max_line_s": { "type": "number", "exclusiveMinimum": 0 },
+        "font": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 8 },
+        "margin_v": { "type": "integer", "minimum": 0 },
+        "primary_color": { "type": "string", "pattern": "^&H[0-9A-Fa-f]{8}$" },
+        "highlight_color": { "type": "string", "pattern": "^&H[0-9A-Fa-f]{8}$" },
+        "outline": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "audio": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target_lufs": { "type": "number", "maximum": -5, "minimum": -36 },
+        "true_peak_db": { "type": "number", "maximum": 0 },
+        "track": {
+          "oneOf": [{ "const": "mix" }, { "type": "integer", "minimum": 0 }]
+        },
+        "junction_fade_s": { "type": "number", "minimum": 0 }
+      }
+    },
+    "render": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "crf": { "type": "integer", "minimum": 0, "maximum": 51 },
+        "preset": {
+          "enum": ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
+        },
+        "mezzanine_crf": { "type": "integer", "minimum": 0, "maximum": 51 }
+      }
+    },
+    "qa": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_fix_attempts": { "type": "integer", "minimum": 0 },
+        "duration_tolerance_frames": { "type": "integer", "minimum": 0 },
+        "lufs_tolerance": { "type": "number", "exclusiveMinimum": 0 },
+        "shorts_max_s": { "type": "number", "exclusiveMinimum": 0 },
+        "pacing_tolerance": { "type": "number", "exclusiveMinimum": 0 },
+        "framing_tolerance": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "verify_transcript": { "type": "boolean" }
+      }
+    },
+    "runs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keep_last": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

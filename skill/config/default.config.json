@@ -1,0 +1,51 @@
+{
+  "input": { "max_minutes": 20 },
+  "whisper": { "model": "small", "language": "auto" },
+  "silence": {
+    "auto_calibrate": true,
+    "offset_db": 10,
+    "min_silence_s": 0.5,
+    "fallback_threshold_db": -30
+  },
+  "cut": {
+    "fillers": ["um", "uh", "like", "you know", "sort of", "kind of", "I mean"],
+    "max_pause_s": 0.8,
+    "pad_s": 0.1,
+    "aggressiveness": "normal",
+    "target_duration_s": null
+  },
+  "aspect": {
+    "mode": "9:16",
+    "no_face_fallback": "blur-pad",
+    "out_width": 1080,
+    "out_height": 1920
+  },
+  "captions": {
+    "enabled": true,
+    "max_words_per_line": 4,
+    "max_line_s": 1.6,
+    "font": "CaptionFont",
+    "size": 96,
+    "margin_v": 420,
+    "primary_color": "&H00FFFFFF",
+    "highlight_color": "&H0000D7FF",
+    "outline": 5
+  },
+  "audio": {
+    "target_lufs": -14,
+    "true_peak_db": -1,
+    "track": "mix",
+    "junction_fade_s": 0.01
+  },
+  "render": { "crf": 18, "preset": "medium", "mezzanine_crf": 12 },
+  "qa": {
+    "max_fix_attempts": 5,
+    "duration_tolerance_frames": 1,
+    "lufs_tolerance": 2,
+    "shorts_max_s": 180,
+    "pacing_tolerance": 0.5,
+    "framing_tolerance": 0.15,
+    "verify_transcript": false
+  },
+  "runs": { "keep_last": 10 }
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "shortstop/transcript.schema.json",
+  "title": "Stage 1 transcript artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["language", "duration_s", "segments"],
+  "properties": {
+    "language": { "type": "string", "minLength": 1 },
+    "duration_s": { "type": "number", "exclusiveMinimum": 0 },
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "start", "end", "text", "words"],
+        "properties": {
+          "id": { "type": "integer", "minimum": 0 },
+          "start": { "type": "number", "minimum": 0 },
+          "end": { "type": "number", "minimum": 0 },
+          "text": { "type": "string" },
+          "words": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["word", "start", "end", "prob"],
+              "properties": {
+                "word": { "type": "string", "minLength": 1 },
+                "start": { "type": "number", "minimum": 0 },
+                "end": { "type": "number", "minimum": 0 },
+                "prob": { "type": "number", "minimum": 0, "maximum": 1 }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

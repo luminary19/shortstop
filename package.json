@@ -1,0 +1,14 @@
+{
+  "name": "shortstop-dev",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dev workspace for the Shortstop skill. The distributable lives in skill/.",
+  "scripts": {
+    "fixtures": "node tests/fixtures.mjs",
+    "test": "node --test tests/"
+  },
+  "dependencies": {
+    "shortstop-skill": "file:./skill"
+  }
+}

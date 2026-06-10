@@ -1,0 +1,11 @@
+node_modules/
+.venv/
+skill/models/
+skill/.shortstop-ready
+tests/fixtures/
+runs/
+input/
+output/
+reference/
+__pycache__/
+*.pyc

@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "shortstop/track.schema.json",
+  "title": "Stage 3 subject-track artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "sample_fps", "detections", "crop_path", "crop_w", "crop_h", "coverage"],
+  "properties": {
+    "mode": { "enum": ["face", "fallback"] },
+    "sample_fps": { "type": "number", "exclusiveMinimum": 0 },
+    "detections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["t", "cx", "cy", "w", "h", "conf"],
+        "properties": {
+          "t": { "type": "number", "minimum": 0 },
+          "cx": { "type": "number" },
+          "cy": { "type": "number" },
+          "w": { "type": "number", "exclusiveMinimum": 0 },
+          "h": { "type": "number", "exclusiveMinimum": 0 },
+          "conf": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "crop_path": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["t", "x", "y"],
+        "properties": {
+          "t": { "type": "number", "minimum": 0 },
+          "x": { "type": "integer", "minimum": 0 },
+          "y": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "crop_w": { "type": "integer", "minimum": 2 },
+    "crop_h": { "type": "integer", "minimum": 2 },
+    "coverage": { "type": "number", "minimum": 0, "maximum": 1 }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "shortstop/probe.schema.json",
+  "title": "Stage 0 probe artifact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fps_num", "fps_den", "fps", "width", "height", "rotation",
+    "display_width", "display_height", "duration_s", "vfr",
+    "normalized_path", "audio_streams", "audio_source"
+  ],
+  "properties": {
+    "fps_num": { "type": "integer", "minimum": 1 },
+    "fps_den": { "type": "integer", "minimum": 1 },
+    "fps": { "type": "number", "exclusiveMinimum": 0 },
+    "width": { "type": "integer", "minimum": 2 },
+    "height": { "type": "integer", "minimum": 2 },
+    "rotation": { "type": "integer" },
+    "display_width": { "type": "integer", "minimum": 2 },
+    "display_height": { "type": "integer", "minimum": 2 },
+    "duration_s": { "type": "number", "exclusiveMinimum": 0 },
+    "vfr": { "type": "boolean" },
+    "normalized_path": { "type": ["string", "null"] },
+    "audio_streams": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "codec", "sample_rate", "channels"],
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "codec": { "type": "string" },
+          "sample_rate": { "type": "integer", "minimum": 1 },
+          "channels": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "audio_source": {
+      "oneOf": [
+        { "const": "mix" },
+        { "type": "integer", "minimum": 0 }
+      ]
+    },
+    "source": { "type": "string" }
+  }
+}
