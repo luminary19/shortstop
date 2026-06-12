@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { SKILL_ROOT } from './lib/artifacts.mjs';
 import { resolveFfmpeg } from './lib/ffmpeg.mjs';
 import { findSystemPython, venvReady, venvPython, pythonImportOk, capturePython } from './lib/venv.mjs';
+import { tryRun } from './lib/spawn.mjs';
 
 const IS_WINDOWS = process.platform === 'win32';
 const PYTHON_FIX = IS_WINDOWS
@@ -18,9 +19,31 @@ export const WHISPER_DIR = join(SKILL_ROOT, 'models', 'whisper');
 export const READY_FLAG = join(SKILL_ROOT, '.shortstop-ready');
 const FONT_PATH = join(SKILL_ROOT, 'assets', 'fonts', 'CaptionFont.ttf');
 
+// espeak-ng — used by tests/fixtures.mjs to synthesize ground-truth test clips;
+// the runtime pipeline never needs it. Checks PATH, $ESPEAK_NG_PATH, and the
+// Windows MSI's default install dir (the MSI updates the machine PATH, which
+// already-running shells don't see).
+export async function findEspeak() {
+  const candidates = [];
+  if (process.env.ESPEAK_NG_PATH) candidates.push(process.env.ESPEAK_NG_PATH);
+  candidates.push('espeak-ng');
+  if (IS_WINDOWS) {
+    for (const root of [process.env.ProgramFiles, process.env['ProgramFiles(x86)']]) {
+      if (root) candidates.push(join(root, 'eSpeak NG', 'espeak-ng.exe'));
+    }
+  }
+  for (const bin of candidates) {
+    const res = await tryRun(bin, ['--version']);
+    if (!res.failed && /eSpeak/i.test(res.stdout ?? '')) {
+      return { bin, version: res.stdout.trim().split(/\s+Data at:/)[0] };
+    }
+  }
+  return null;
+}
+
 export async function runChecks() {
   const checks = [];
-  const add = (name, ok, detail, fix = null) => checks.push({ name, ok, detail, fix });
+  const add = (name, ok, detail, fix = null, optional = false) => checks.push({ name, ok, detail, fix, optional });
 
   // Node version
   const [nodeMajor] = process.versions.node.split('.').map(Number);
@@ -72,17 +95,23 @@ export async function runChecks() {
   add('caption font', existsSync(FONT_PATH), FONT_PATH,
     're-clone the skill folder: assets/fonts/CaptionFont.ttf is bundled');
 
+  // espeak-ng (optional): only the test fixture generator needs it
+  const espeak = await findEspeak();
+  add('espeak-ng (dev/tests)', Boolean(espeak),
+    espeak ? `${espeak.version} (${espeak.bin})` : 'not found — only needed to generate test fixtures',
+    IS_WINDOWS ? 'winget install eSpeak-NG.eSpeak-NG' : 'apt install espeak-ng', true);
+
   return checks;
 }
 
 export function reportChecks(checks) {
   let allOk = true;
   for (const c of checks) {
-    const mark = c.ok ? '✔' : '✘';
+    const mark = c.ok ? '✔' : (c.optional ? '–' : '✘');
     console.log(`${mark} ${c.name.padEnd(22)} ${c.detail}`);
     if (!c.ok && c.fix) {
       console.log(`   fix: ${c.fix}`);
-      allOk = false;
+      if (!c.optional) allOk = false;
     }
   }
   return allOk;
@@ -93,7 +122,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const checks = await runChecks();
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify(checks, null, 2));
-    process.exit(checks.every((c) => c.ok) ? 0 : 1);
+    process.exit(checks.every((c) => c.ok || c.optional) ? 0 : 1);
   }
   const ok = reportChecks(checks);
   console.log(ok ? '\nall green — shortstop is ready.' : '\nsome checks failed — apply the fixes above, then re-run doctor.');

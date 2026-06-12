@@ -99,10 +99,10 @@ export function buildCropCmdFile(track, edl, probe, outPath) {
 
 // ---------- pass B: crop/scale/captions + loudnorm ----------
 
-async function measureLoudness(path, config) {
+async function measureLoudness(path, config, prefilter = null) {
   const res = await ffmpegInfo([
     '-loglevel', 'info', '-i', path,
-    '-af', `loudnorm=I=${config.audio.target_lufs}:TP=${config.audio.true_peak_db}:LRA=11:print_format=json`,
+    '-af', `${prefilter ? prefilter + ',' : ''}loudnorm=I=${config.audio.target_lufs}:TP=${config.audio.true_peak_db}:LRA=11:print_format=json`,
     '-f', 'null', '-',
   ]);
   const text = res.all ?? res.stderr;
@@ -159,22 +159,33 @@ export async function renderPassB(runDir, { probe, edl, track, config, attempt, 
   const tp = (audioOverrides.true_peak_db ?? config.audio.true_peak_db) - 0.5;
   const measured = await measureLoudness(mezzPath, config);
   const srcRate = probe.audio_streams[0].sample_rate;
-  let aChain =
-    `loudnorm=I=${target}:TP=${tp}:LRA=11:` +
-    `measured_I=${measured.input_i}:measured_TP=${measured.input_tp}:` +
-    `measured_LRA=${measured.input_lra}:measured_thresh=${measured.input_thresh}:` +
-    `offset=${measured.target_offset}:linear=true`;
-  // Linear loudnorm caps its gain so peaks stay under TP; high-crest audio then
-  // undershoots the integrated target. Predict the deficit and make it up with
-  // a limiter catching only the peaks.
-  const wantedGain = target - Number(measured.input_i);
-  const allowedGain = tp - Number(measured.input_tp);
-  const deficit = wantedGain - Math.min(wantedGain, allowedGain);
-  if (deficit > 0.25) {
-    const limitLin = Math.pow(10, tp / 20).toFixed(4);
-    aChain += `,volume=${deficit.toFixed(2)}dB,alimiter=limit=${limitLin}:attack=5:release=100:level=0`;
+  // Flat gain to the integrated target + true-peak limiter, converged against
+  // real measurements: the limiter eats an unpredictable share of integrated
+  // loudness on high-crest audio (1-2 LUFS on synthetic speech, ~0 on typical
+  // voice), and loudnorm's own apply pass switches between linear/capped/
+  // dynamic per source — every blind one-shot chain misses for some input.
+  // So measure the chain's audio-only output over the mezzanine and walk the
+  // gain (secant steps, since the limiter compresses added gain) until the
+  // integrated target is met. A few seconds of extra work per render.
+  const limiter = `alimiter=limit=${Math.pow(10, tp / 20).toFixed(4)}:attack=5:release=100:level=0`;
+  const measureAt = async (g) =>
+    Number((await measureLoudness(mezzPath, config, `volume=${g.toFixed(2)}dB,${limiter}`)).input_i);
+  let gain = target - Number(measured.input_i);
+  let got = await measureAt(gain);
+  let prevGain = null;
+  let prevGot = null;
+  for (let n = 0; n < 3 && Math.abs(target - got) > 0.3; n++) {
+    const slope = prevGain !== null && Math.abs(gain - prevGain) > 1e-6 && got !== prevGot
+      ? (got - prevGot) / (gain - prevGain)
+      : 1;
+    // limiter only ever attenuates: slope ∈ (0, 1]; clamp the step to stay sane
+    const step = Math.max(-6, Math.min(6, (target - got) / Math.min(Math.max(slope, 0.15), 1)));
+    prevGain = gain;
+    prevGot = got;
+    gain += step;
+    got = await measureAt(gain);
   }
-  aChain += `,aresample=${srcRate}`;
+  const aChain = `volume=${gain.toFixed(2)}dB,${limiter},aresample=${srcRate}`;
 
   const candidate = join(runDir, `candidate_a${attempt}.mp4`);
   const args = ['-i', mezzPath];

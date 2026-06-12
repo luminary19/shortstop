@@ -57,7 +57,16 @@ export async function probe(inputPath, runDir, { config } = {}) {
   const rotation = streamRotation(v);
   const rotated = ((rotation % 180) + 180) % 180 !== 0 ? 'swap' : (rotation !== 0 ? 'bake' : null);
   const exotic = !SAFE_VCODECS.has(v.codec_name);
-  const needsNormalize = vfr || rotation !== 0 || exotic;
+  // Audio/video stream start skew (e.g. Windows Camera writes audio start_time
+  // +0.3s): downstream times come from an extracted WAV where t=0 is the first
+  // SAMPLE, but render cuts by PTS — a skew silently shifts every cut. Normalize
+  // it away by materializing the skew as real leading silence (or a head trim).
+  const vStartS = Number(v.start_time) || 0;
+  const aStartS = meta.audio.length ? (Number(meta.audio[0].start_time) || 0) : 0;
+  const startSkewS = aStartS - vStartS;
+  const skewed = meta.audio.length > 0 && Math.abs(startSkewS) > 0.02;
+  const needsVideoWork = vfr || rotation !== 0 || exotic;
+  const needsNormalize = needsVideoWork || skewed;
 
   let readPath = input;
   let normalizedPath = null;
@@ -65,12 +74,23 @@ export async function probe(inputPath, runDir, { config } = {}) {
 
   if (needsNormalize) {
     normalizedPath = join(runDir, 'normalized.mkv'); // mkv: any source audio codec stream-copies
-    const args = ['-i', input,
-      '-map', '0:v:0', '-map', '0:a?',
-      '-c:v', 'libx264', '-crf', '12', '-preset', 'medium', '-pix_fmt', 'yuv420p',
-      '-fps_mode', 'cfr', '-r', `${fpsRat.num}/${fpsRat.den}`,
-      '-c:a', 'copy',
-      normalizedPath];
+    const args = ['-i', input, '-map', '0:v:0', '-map', '0:a?'];
+    if (needsVideoWork) {
+      args.push('-c:v', 'libx264', '-crf', '12', '-preset', 'medium', '-pix_fmt', 'yuv420p',
+        '-fps_mode', 'cfr', '-r', `${fpsRat.num}/${fpsRat.den}`);
+    } else {
+      args.push('-c:v', 'copy');
+    }
+    if (skewed) {
+      // Multi-track sources use stream 0's skew for all tracks (shared clock).
+      const af = startSkewS > 0
+        ? `asetpts=PTS-STARTPTS,adelay=${Math.round(startSkewS * 1000)}:all=1`
+        : `asetpts=PTS-STARTPTS,atrim=start=${(-startSkewS).toFixed(6)},asetpts=PTS-STARTPTS`;
+      args.push('-af', af, '-c:a', 'pcm_s16le');
+    } else {
+      args.push('-c:a', 'copy');
+    }
+    args.push(normalizedPath);
     await ffmpeg(args); // ffmpeg autorotates on re-encode: display matrix is baked in
     readPath = normalizedPath;
   }
@@ -78,7 +98,11 @@ export async function probe(inputPath, runDir, { config } = {}) {
   // Final metadata always read from the file downstream stages will consume.
   const finalMeta = await probeFile(readPath);
   const fv = finalMeta.video[0];
-  const finalR = parseRational(fv.r_frame_rate) ?? fpsRat;
+  // Stream-copied video keeps the source's frames: trust the source's exact fps
+  // rational over the container's estimate (MKV ms-rounding mangles it).
+  const finalR = needsVideoWork
+    ? (parseRational(fv.r_frame_rate) ?? fpsRat)
+    : (r ?? avg ?? parseRational(fv.r_frame_rate));
   const width = fv.width;
   const height = fv.height;
   // After normalization rotation is baked; otherwise rotation is 0 by construction here.

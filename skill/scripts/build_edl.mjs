@@ -23,28 +23,29 @@ function inSilence(t, regions) {
 // Snapping rule (refined from the plan's literal "midpoint always"):
 // snapping only ever EXPANDS a keep into its removed gap — that is what absorbs
 // Whisper word-end slop without ever resurrecting removed content.
-//  - a boundary already inside detected silence stays put;
 //  - an END boundary moves RIGHT to min(midpoint, silence_start + NUDGE) of the
-//    first silence region in its gap;
+//    silence region containing or following it — i.e. it lands at least NUDGE
+//    past the end of speech, even when the padded boundary is already a hair
+//    inside the silence (a boundary at silence_start + 0.05 is still an abrupt
+//    cut; one NUDGE deep is not);
 //  - a START boundary moves LEFT to max(midpoint, silence_end - NUDGE);
+//  - a boundary already NUDGE-deep or deeper stays put (expansion only);
 //  - movement is capped at SNAP_MAX (a midpoint 1.6 s away is not slop absorption
 //    — naive midpoint snapping collapses long-pause removals to zero).
 const SNAP_NUDGE = 0.25;
 const SNAP_MAX = 1.0;
 
 function snapEndBoundary(t, gapHi, regions) {
-  if (inSilence(t, regions)) return t;
   const region = regions.find((r) => r.end > t + EPS && r.start < gapHi - EPS);
   if (!region) return t;
-  const target = Math.min((region.start + region.end) / 2, Math.max(t, region.start) + SNAP_NUDGE, gapHi);
+  const target = Math.min((region.start + region.end) / 2, region.start + SNAP_NUDGE, gapHi);
   return (target - t) > 0 && (target - t) <= SNAP_MAX ? target : t;
 }
 
 function snapStartBoundary(t, gapLo, regions) {
-  if (inSilence(t, regions)) return t;
   const region = [...regions].reverse().find((r) => r.start < t - EPS && r.end > gapLo + EPS);
   if (!region) return t;
-  const target = Math.max((region.start + region.end) / 2, Math.min(t, region.end) - SNAP_NUDGE, gapLo);
+  const target = Math.max((region.start + region.end) / 2, region.end - SNAP_NUDGE, gapLo);
   return (t - target) > 0 && (t - target) <= SNAP_MAX ? target : t;
 }
 

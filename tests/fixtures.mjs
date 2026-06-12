@@ -3,6 +3,7 @@
 // so ground-truth cut points, silences, and motion paths are known by construction.
 // Usage: node tests/fixtures.mjs [--force]
 import { execa } from 'execa';
+import { findEspeak } from 'shortstop-skill/scripts/doctor.mjs';
 import ffmpegPath from 'ffmpeg-static';
 import { path as ffprobePath } from 'ffprobe-static';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
@@ -42,9 +43,19 @@ async function probeDuration(path) {
   return parseFloat(stdout.trim());
 }
 
+let espeakBin = null;
+
 async function espeakPhrase(text, outWav) {
+  if (!espeakBin) {
+    const found = await findEspeak();
+    if (!found) {
+      throw new Error('espeak-ng not found — install it to generate test fixtures ' +
+        '(winget install eSpeak-NG.eSpeak-NG / apt install espeak-ng)');
+    }
+    espeakBin = found.bin;
+  }
   const raw = outWav + '.raw.wav';
-  await execa('espeak-ng', ['-v', 'en-us', '-s', '150', '-w', raw, text]);
+  await execa(espeakBin, ['-v', 'en-us', '-s', '150', '-w', raw, text]);
   // Trim espeak's leading/trailing silence so planted gap boundaries are exact,
   // then resample to the common fixture format.
   await ff([

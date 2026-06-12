@@ -1,55 +1,43 @@
-# Session Summary — 2026-06-10 14:10
+# Session Summary — 2026-06-12 16:05
 
 ## Current task
-Full implementation of PLAN.md v2 (Shortstop — Claude Code skill turning a raw clip into a 9:16 captioned Short). **All 11 phases are complete, tested, and committed.** No work is in flight; the session ended with a clean working tree at commit `f66454d`.
+First real-world run of the `/shortstop` skill on native Windows 11 (previous dev was on a Linux VPS). Ran the full shorts pipeline twice on `input/WIN_20260611_22_29_08_Pro.mp4` (147 s talking-head test recording), found and fixed five Windows/real-source bugs in the skill, delivered 3 QA-passed Shorts, and got the full test suite green on Windows (66/66). All fixes are **uncommitted** — committing is the next step.
 
 ## Status
 - Completed this session:
-  - Phase 0: 6 artifact schemas + config schema, `skill/scripts/lib/artifacts.mjs` (Ajv + semantic invariants + config merge), `tests/fixtures.mjs` deterministic fixture generator (espeak-ng + ffmpeg, ground-truth manifest), bundled Montserrat Bold as `skill/assets/fonts/CaptionFont.ttf`
-  - Phase 1: `bootstrap.mjs` (dep-free until npm install), `doctor.mjs`, `lib/{spawn,ffmpeg,venv}.mjs`; venv at `skill/.venv` with faster-whisper 1.2.1 + opencv-python-headless; YuNet + whisper "small" models in `skill/models/`
-  - Phase 2: `probe.mjs` + `lib/timecode.mjs` (rational fps, VFR→CFR normalize to `normalized.mkv`, rotation bake, 20-min cap)
-  - Phase 3: `transcribe.py` + `transcribe.mjs` bridge (shared mixdown WAV)
-  - Phase 4: `silence.mjs` (peak-level window calibration — silencedetect compares peaks not RMS)
-  - Phase 5: `build_edl.mjs` (pad → directional expansion-only silence snap → merge → no-straddle → stats; machine-readable rejections) + `prompts/cut_decisions.md`
-  - Phase 6: `track.py`/`track.mjs` (YuNet @5fps, sticky largest face, dead-zone + critically-damped spring, velocity clamp, blur-pad fallback)
-  - Phase 7: `build_captions.mjs` (source→output word map, line grouping, karaoke \k ASS)
-  - Phase 8: `render.mjs` (pass A trim/micro-fade/concat MKV+PCM mezzanine; pass B sendcmd dynamic crop / blur-pad, lanczos, caption burn, two-pass linear loudnorm + TP-deficit makeup via alimiter + 0.5 dB AAC headroom; post-render assertions; pass-B-only rerender via EDL keep-hash)
-  - Phase 9: `qa.mjs` (duration/loudness/peak/black/freeze/framing/pacing/captions; reference cache in `reference/.shortstop-cache/`), `lib/qaloop.mjs` (bounded loop invariants), `deliver.mjs` (soft-deliver/hard-refuse, QA_REPORT.md, no-clobber, runs pruning), `prompts/qa_gap_fix.md`
-  - Phase 10: `skill/SKILL.md` playbook; e2e test (two runs, no clobber); skill symlinked at `.claude/skills/shortstop` (discovered as /shortstop); README quickstart
-  - Phase 11: `scripts/package.mjs` (tarball in `dist/`), `tests/clean-install-e2e.mjs` (bare-copy bootstrap → full pipeline → PASS)
-  - Test results: `npm test` 51/51 pass; clean-install E2E PASS
-- In progress: nothing
-- Pending / next steps (optional follow-ups, not started):
-  1. Live judgment-path validation: invoke `/shortstop` on `tests/fixtures/speech.mp4` so Claude actually performs Stage 4 + QA loop (the only untested-by-automation paths, by design); record results per `tests/eval_cut_prompt.md`
-  2. True container-isolated clean-machine check (no Docker/Podman on this VPS — Phase 11 used a temp-dir simulation)
-  3. Optional: CI workflow under `.github/`
+  - One-time Windows bootstrap (ffmpeg static, Python 3.14 venv, faster-whisper 1.2.1, YuNet, Whisper "small")
+  - **Bug 1 — filtergraph path escaping** (`skill/scripts/lib/ffmpeg.mjs:129` `escapeFilterPath`): single-level backslash escaping collapsed `sendcmd`/`subtitles` paths on Windows (two parser levels). Fix: forward slashes + two-level colon escape (`\\:`).
+  - **Bug 2 — audio/video start skew** (`skill/scripts/probe.mjs`): source camera writes audio stream `start_time` +0.317 s vs video 0. Transcript/silence times are WAV-content-relative; render cuts by PTS → every cut landed 0.317 s early (clipped last word of each keep, captions led audio). Fix: probe detects skew > 20 ms and normalizes (skew materialized as leading silence via `asetpts,adelay` / head-trim via `atrim`; `-c:v copy` when only skew needs fixing; source fps rational kept because MKV mangles it, e.g. 119/6 → 23101/1165).
+  - **Bug 3 — abrupt cut tails** (`skill/scripts/build_edl.mjs` `snapEndBoundary`/`snapStartBoundary`): "already inside silence → stay put" early-return left keep ends ~0.1 s after last word. Fix: end boundaries land ≥ SNAP_NUDGE (0.25 s) past silence start (expansion-only, SNAP_MAX capped); starts symmetric.
+  - **Bug 4 — loudness chain** (`skill/scripts/render.mjs` pass B): loudnorm apply pass is source-dependent (linear / TP-capped-undershoot / dynamic-fallback), so the old predictive "deficit makeup" overshot real clips +4.7 dB and every blind one-shot chain failed some input. Final fix: flat `volume` gain + `alimiter` TP limiter, converged by measuring the chain's audio-only output on the mezzanine and walking the gain with secant steps (≤4 measures, stop within 0.3 LU). `measureLoudness()` gained a `prefilter` param.
+  - **espeak-ng**: installed 1.52.0 via winget (`C:\Program Files\eSpeak NG\`). `doctor.mjs` gained exported `findEspeak()` ($ESPEAK_NG_PATH → PATH → Program Files) and an **optional** `espeak-ng (dev/tests)` check (reports, never fails doctor/bootstrap — runtime doesn't need it). `tests/fixtures.mjs` uses `findEspeak()` instead of bare `execa('espeak-ng')`.
+  - Delivered (run `runs/20260612-144848-8nj6/`, in `output/`): clip1 "Meet Shortstop" 40.4 s score 92 (soft framing — walking demo, accepted); clip2 "Cutting shorts by semantic ideas" 42.6 s **score 100 pass**; clip3 "Dota 2 practice" 20.8 s score 98 (pacing advisory). Verified by re-transcribing clip1: previously chopped words ("around.", "there.") intact.
+  - Deleted the defective first-run deliverables (run `20260612-141926-cmak`) from `output/`.
+  - `npm install` at repo root (tests need root `node_modules` for the `shortstop-skill` link); full suite on Windows: **66/66 pass**.
+- In progress: nothing.
+- Pending / next steps:
+  1. **Commit the six modified files** (user signalled intent, not yet done).
+  2. Note: first full `npm test` after fixture deletion may race (suites generate fixtures concurrently → 2 phantom failures); re-run or pre-generate via `node tests/fixtures.mjs`. Not fixed this session.
+  3. Optional: bootstrap via the `.claude/skills/shortstop` symlink silently no-oped once on Windows (exit 0, no output) — root cause not investigated; always ran scripts via real `skill/` path instead.
 
 ## Files touched
-- `skill/SKILL.md`, `skill/package.json`, `skill/.nvmrc`
-- `skill/schemas/{probe,transcript,silence,track,edl,qa_report}.schema.json`
-- `skill/config/{default.config.json,config.schema.json}`
-- `skill/scripts/{bootstrap,doctor,probe,transcribe,silence,track,build_edl,build_captions,render,qa,deliver}.mjs`, `skill/scripts/{transcribe,track}.py`
-- `skill/scripts/lib/{artifacts,spawn,ffmpeg,venv,timecode,qaloop}.mjs`
-- `skill/prompts/{cut_decisions,qa_gap_fix}.md`
-- `skill/assets/fonts/{CaptionFont.ttf,OFL.txt}`
-- `tests/{fixtures.mjs,artifacts,probe,transcribe,silence,build_edl,track,captions,render,qa,e2e}.test.mjs`, `tests/clean-install-e2e.mjs`, `tests/eval_cut_prompt.md`
-- `package.json` (root dev workspace; test glob `'tests/*.test.mjs'`), `README.md`, `.gitignore`, `scripts/package.mjs`
-- Symlink `.claude/skills/shortstop` → `skill/`
+- `skill/scripts/lib/ffmpeg.mjs:128-143` — `escapeFilterPath` Windows fix
+- `skill/scripts/probe.mjs:57-96` — start-skew detection + normalize; `:98-107` source fps rational when video stream-copied
+- `skill/scripts/build_edl.mjs:23-49` — snap boundary rules (removed in-silence early-return)
+- `skill/scripts/render.mjs:102-112` — `measureLoudness(path, config, prefilter)`; `:155-190` converging gain+limiter audio chain (replaces loudnorm apply/deficit makeup)
+- `skill/scripts/doctor.mjs` — `findEspeak()` export; optional-check support in `add()`/`reportChecks()`/`--json` exit
+- `tests/fixtures.mjs:6,45-58` — espeak resolution via `findEspeak()`
+- Deleted: `output/*-20260612-141926-cmak-*` (defective deliverables)
 
 ## Key decisions
-- **ffmpeg-static 7.0.2 segfaults on mpegts demux** on this VPS → fixtures use .mp4 segments; `lib/ffmpeg.mjs` validates binaries with a real encode smoke test and falls back to PATH ffmpeg
-- **opencv-python-headless** instead of opencv-python (no libGL on servers)
-- **Silence calibration uses window Peak_level, not RMS** — silencedetect thresholds compare sample peaks; RMS floors detect nothing on noisy audio
-- **EDL snapping deviates from plan's literal "midpoint"**: directional, expansion-only, `min(midpoint, silence_start+0.25s)` capped at 1s — literal midpoint collapses long-pause removals to zero (documented in build_edl.mjs)
-- **Loudness**: linear loudnorm undershoots when TP-capped → predicted-deficit makeup volume + alimiter; **0.5 dB headroom below TP target** because AAC encoding overshoots PCM peaks (~0.3 dB, caught by QA in e2e)
-- **bootstrap.mjs must stay import-free of npm deps** until after its own `npm install` step (clean-machine crash otherwise)
-- `node --test tests/` (bare dir) fails on Node 24 — npm test uses a quoted glob
-- Normalized intermediate is `.mkv` (any source audio codec stream-copies)
-- freezedetect runs only in face mode (screen recordings are legitimately static)
+- Skew fixed at **ingest** (probe normalize) rather than compensating in render/track/captions separately — one invariant ("all streams start at PTS 0"), all 5 downstream stages already read `probe.normalized_path ?? probe.source`.
+- espeak-ng is a **dev/test-only optional** doctor check — hard-failing doctor for a fixtures-only tool would break end-user bootstrap UX.
+- Loudness must be **measured, not predicted**: ffmpeg loudnorm linear/dynamic branch choice is opaque per-source; secant-converged flat gain + limiter is deterministic for every input (cost: a few seconds of audio-only measure passes per render).
+- Clip1 soft framing gap (0.79 vs 0.9) accepted without a fix attempt: tracker is deterministic, re-run cannot change it, and the off-center frames are the on-camera walking demo.
+- Existing delivered clips NOT re-rendered after the final loudness-chain change — they were QA-measured clean; change only affects future renders.
 
 ## Open questions / blockers
-- None blocking. No container runtime on this VPS if a true clean-machine check is wanted.
-- HF model downloads are unauthenticated (rate-limit warnings); setting HF_TOKEN would speed bootstrap.
+- None blocking. User has eyeballed candidate quality across runs; current `output/` clips reflect all fixes except the final loudness-chain iteration (which QA showed wasn't needed for this source).
 
 ## Next concrete step
-Invoke `/shortstop` on a real clip (or `tests/fixtures/speech.mp4` copied to `input/`, with `tests/fixtures/reference.mp4` in `reference/`) to exercise the live Claude judgment paths end-to-end.
+Commit the six modified files (skew/snap/escape/loudness/doctor/fixtures) with a message covering the five Windows/real-source fixes, e.g. on `main` directly or a `windows-fixes` branch per user preference.

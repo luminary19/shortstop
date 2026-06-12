@@ -126,11 +126,14 @@ export async function extractWhisperWav(mediaPath, probe, outWav) {
 }
 
 // Escape a path for use inside a filtergraph option value (subtitles=, sendcmd=).
+// Values pass through two parsers: the filtergraph parser (one \ level), then the
+// option-value parser (a second level). Backslash path separators would need 4x
+// escaping, so use forward slashes (ffmpeg accepts them on Windows); the drive
+// colon needs both levels (\\:).
 export function escapeFilterPath(p) {
-  // Level 1: escape for the option value parser; level 2: for the filtergraph parser.
   return p
-    .replaceAll('\\', '\\\\')
-    .replaceAll(':', '\\:')
+    .replaceAll('\\', '/')
+    .replaceAll(':', '\\\\:')
     .replaceAll("'", "\\'")
     .replaceAll('[', '\\[')
     .replaceAll(']', '\\]')
